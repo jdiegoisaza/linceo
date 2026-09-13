@@ -19,7 +19,7 @@ from typing import Protocol, runtime_checkable
 
 from linceo.core.context import ExecutionContext
 from linceo.core.execution import DataSource
-from linceo.core.findings import Category, Finding
+from linceo.core.findings import Category, RawFinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,20 +76,22 @@ class ToolIntegration(Protocol):
     Deliberately thin: invoke the binary and parse its output, nothing
     more — not even severity normalization, which lives in a single shared
     component applying the versioned severity map (ADR §6), never in a
-    per-tool parser. `parse_output` emits each finding's native severity
-    as-is into `Finding.raw_severity` and performs no normalization of its
-    own.
+    per-tool parser. `parse_output` returns `RawFinding`, not `Finding`:
+    each finding's native severity travels as-is in `RawFinding.raw_severity`,
+    and turning that into a normalized `Finding` is the
+    `SeverityNormalizer`'s job, never the parser's.
     """
 
     name: str
+    version: str
     category: Category
 
     def build_command(self, *, workspace_path: str) -> Sequence[str]:
         """Build the argv to invoke this tool against `workspace_path`."""
         ...
 
-    def parse_output(self, result: ProcessResult) -> Sequence[Finding]:
-        """Parse a completed `ProcessResult` into this tool's findings."""
+    def parse_output(self, result: ProcessResult) -> Sequence[RawFinding]:
+        """Parse a completed `ProcessResult` into this tool's raw findings."""
         ...
 
     def data_sources(self) -> Sequence[DataSource]:

@@ -7,3 +7,7 @@ and ``FakeToolExecutor``, an injectable clock and identifier generator, and
 golden fixtures captured from real tool output. See
 ``docs/adr/ADR-000-arquitectura-base-y-alcance-v0.1.md``, §11.
 """
+
+from linceo.testing.fakes import FakeContextProvider, FakeToolExecutor
+
+__all__ = ["FakeContextProvider", "FakeToolExecutor"]

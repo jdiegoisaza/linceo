@@ -56,6 +56,19 @@ class Severity(StrEnum):
         return cls.CRITICAL
 
 
+#: The five levels ordered from most to least severe (ADR §6). The gate
+#: uses this to decide whether a finding meets or exceeds a `--fail-on`
+#: threshold; nothing here is stored on `Severity` itself as comparison
+#: operators, since a plain lookup tuple is enough for that one use.
+SEVERITY_ORDER: tuple[Severity, ...] = (
+    Severity.CRITICAL,
+    Severity.HIGH,
+    Severity.MEDIUM,
+    Severity.LOW,
+    Severity.INFO,
+)
+
+
 class SeveritySource(StrEnum):
     """Which precedence-chain signal ultimately decided a finding's severity.
 

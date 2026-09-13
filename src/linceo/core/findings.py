@@ -60,6 +60,35 @@ class Package:
 
 
 @dataclass(frozen=True, slots=True)
+class RawFinding:
+    """A finding exactly as a `ToolIntegration` parser emitted it, before severity normalization.
+
+    `raw_severity` is the tool's native value untouched — `None` when the
+    tool emits no native severity at all, as Gitleaks does not — and
+    `cvss_score`, when present, is a CVSS v3.1 base score a parser found
+    alongside it. A parser never resolves either of these into the
+    project's normalized `Severity` scale itself; that is the
+    `SeverityNormalizer`'s sole job (ADR §6, `linceo.core.normalization`),
+    which turns a `RawFinding` into the canonical `Finding`.
+
+    Carries every field the fingerprint of its category needs
+    (`linceo.core.fingerprint`) plus a human-readable `message`, but no
+    `fingerprint` field of its own: computing it is the normalization
+    step's responsibility, not the parser's.
+    """
+
+    tool: str
+    category: Category
+    rule_id: str
+    message: str
+    location: Location
+    raw_severity: str | None
+    cvss_score: float | None = None
+    package: Package | None = None
+    secret_hash: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Finding:
     """A single normalized finding, the unit both dedup and the gate act on.
 
