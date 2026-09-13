@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# uv
+.uv-cache/
+
+# Test and coverage artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local configuration overrides — never a source of truth for this
+# repository (see AGENTS.md, "no client configuration" and ADR-000 §R5)
+.env
+.env.*

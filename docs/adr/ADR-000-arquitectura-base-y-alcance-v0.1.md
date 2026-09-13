@@ -941,6 +941,45 @@ fichero de supresiones generado automáticamente, no un concepto de diseño dist
   necesidad de un caso especial adicional, el renombrado de `rule_id` entre versiones
   de una herramienta, ya mencionado como limitación en §5.
 
+### §8.3. Framework de CLI — Decidido: Typer
+
+**Elegido: Typer**, anclado `>=0.12,<1.0`. Motivo específico de este proyecto: `--fail-on`
+y `--strict-normalization` validan contra la escala de severidad de §6, y Typer valida un
+argumento contra un `Enum` de Python de forma nativa. En argparse esa validación se
+escribe y se mantiene sincronizada a mano — exactamente la duplicación que desalinea el
+CLI respecto del núcleo cada vez que §6 cambia. Con §8 declarando que el CLI es el
+producto, pagar esa plomería a mano no se justifica.
+
+**Descartado: argparse.** Sus argumentos a favor son reales y se registran, no se
+descartan por debilidad: menos superficie de cadena de suministro que auditar en una
+herramienta de seguridad, y cero riesgo de que una actualización de una dependencia
+rompa un contrato ya cubierto por semver (flags y códigos de salida, §8). Se descarta
+específicamente por el coste recurrente de mantener a mano la validación de argumentos
+sincronizada con la escala de §6, no porque esos argumentos sean inválidos.
+
+**Descartado: Click.** Mismo coste de dependencia que Typer — Typer se construye sobre
+Click — sin el tipado derivado de anotaciones que es el motivo concreto por el que se
+elige Typer.
+
+**Relación con R2, explícita para que esta decisión no se lea como un debilitamiento de
+esa restricción:** ni Typer ni su árbol de dependencias abren conexión de red. La decisión
+de R2 —no existe cliente HTTP en las dependencias base del paquete— sigue vigente sin
+cambios, y su mecanismo de verificación sigue siendo, únicamente, el test de socket
+envenenado descrito en §4. La lista de dependencias del paquete nunca fue, y no pasa a
+ser con esta decisión, el mecanismo que hace a R2 verificable.
+
+Restricciones que acompañan la decisión:
+
+1. Typer vive únicamente en `cli/`. Nunca se importa desde `core/`, `adapters/` ni
+   `providers/`; el test de AST descrito en §4 para la frontera de `core/` cubre también
+   esta regla.
+2. La capa de CLI traduce argumentos de línea de comandos a objetos del dominio y no
+   contiene lógica propia. Un run completo debe poder ejecutarse desde Python sin pasar
+   por Typer en ningún punto.
+3. Anclada por rango de versión mayor (`<1.0`) y auditada en el lockfile — una subida de
+   versión mayor de Typer pasa por el mismo escrutinio que cualquier otro cambio
+   incompatible cubierto por semver en este documento.
+
 ### Una categoría por invocación en v0.1, y por qué no contradice §1
 
 El límite es deliberadamente de superficie de CLI, no del núcleo: el modelo de

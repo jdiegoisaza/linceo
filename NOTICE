@@ -1,0 +1,12 @@
+linceo
+Copyright 2026 Juan Diego Isaza
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project is designed from scratch. Its architecture is informed by public
+documentation and the observable behavior of tools in the DevSecOps
+orchestration category — never by reading the source code of any
+AGPL-3.0-licensed reference project in that category. No code, module
+structure, or symbol naming is copied or derived from such a project. See
+docs/adr/ADR-000-arquitectura-base-y-alcance-v0.1.md, §12, for the full
+clean-room protocol this project follows.
