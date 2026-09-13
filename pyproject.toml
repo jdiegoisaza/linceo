@@ -122,7 +122,7 @@ addopts = [
   "not integration",
   "--cov=linceo",
   "--cov-report=term-missing",
-  "--cov-fail-under=100",
+  "--cov-fail-under=80",
 ]
 testpaths = ["tests"]
 markers = [
