@@ -15,7 +15,7 @@ def test_runs_argv_as_a_list_and_captures_stdout_and_exit_code(tmp_path: Path) -
     executor = SubprocessToolExecutor()
 
     result = executor.run(
-        (sys.executable, "-c", "print('hello from child')"), env={}, cwd=str(tmp_path)
+        (sys.executable, "-c", "print('hello from child')"), env={}, cwd=str(tmp_path), timeout=None
     )
 
     assert result.exit_code == 0
@@ -27,7 +27,7 @@ def test_captures_a_nonzero_exit_code_without_raising(tmp_path: Path) -> None:
     executor = SubprocessToolExecutor()
 
     result = executor.run(
-        (sys.executable, "-c", "import sys; sys.exit(7)"), env={}, cwd=str(tmp_path)
+        (sys.executable, "-c", "import sys; sys.exit(7)"), env={}, cwd=str(tmp_path), timeout=None
     )
 
     assert result.exit_code == 7
@@ -44,6 +44,7 @@ def test_captures_stderr_separately_from_stdout(tmp_path: Path) -> None:
         ),
         env={},
         cwd=str(tmp_path),
+        timeout=None,
     )
 
     assert result.stdout.strip() == "out"
@@ -56,7 +57,10 @@ def test_runs_in_the_given_working_directory(tmp_path: Path) -> None:
     marker.write_text("found me")
 
     result = executor.run(
-        (sys.executable, "-c", "print(open('marker.txt').read())"), env={}, cwd=str(tmp_path)
+        (sys.executable, "-c", "print(open('marker.txt').read())"),
+        env={},
+        cwd=str(tmp_path),
+        timeout=None,
     )
 
     assert result.stdout.strip() == "found me"
@@ -77,6 +81,7 @@ def test_env_is_merged_over_the_inherited_process_environment(
         (sys.executable, "-c", script),
         env={"LINCEO_EXTRA_VAR": "extra"},
         cwd=str(tmp_path),
+        timeout=None,
     )
 
     lines = result.stdout.splitlines()
@@ -87,7 +92,7 @@ def test_missing_binary_raises_file_not_found_error(tmp_path: Path) -> None:
     executor = SubprocessToolExecutor()
 
     with pytest.raises(FileNotFoundError):
-        executor.run(("definitely-not-a-real-binary-xyz",), env={}, cwd=str(tmp_path))
+        executor.run(("definitely-not-a-real-binary-xyz",), env={}, cwd=str(tmp_path), timeout=None)
 
 
 def test_timeout_raises_timeout_expired(tmp_path: Path) -> None:
@@ -95,5 +100,35 @@ def test_timeout_raises_timeout_expired(tmp_path: Path) -> None:
 
     with pytest.raises(subprocess.TimeoutExpired):
         executor.run(
-            (sys.executable, "-c", "import time; time.sleep(5)"), env={}, cwd=str(tmp_path)
+            (sys.executable, "-c", "import time; time.sleep(5)"),
+            env={},
+            cwd=str(tmp_path),
+            timeout=None,
+        )
+
+
+def test_per_call_timeout_overrides_the_executors_own_default(tmp_path: Path) -> None:
+    """`ToolConfig.timeout` (ADR §8.5), threaded through as a per-call `timeout`, wins."""
+    executor = SubprocessToolExecutor()  # no default timeout at all
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        executor.run(
+            (sys.executable, "-c", "import time; time.sleep(5)"),
+            env={},
+            cwd=str(tmp_path),
+            timeout=0.05,
+        )
+
+
+def test_per_call_timeout_of_none_falls_back_to_the_executors_own_default(
+    tmp_path: Path,
+) -> None:
+    executor = SubprocessToolExecutor(timeout_seconds=0.05)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        executor.run(
+            (sys.executable, "-c", "import time; time.sleep(5)"),
+            env={},
+            cwd=str(tmp_path),
+            timeout=None,
         )

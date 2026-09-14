@@ -24,6 +24,7 @@ from linceo.core.normalization import SeverityNormalizer, normalize_finding
 from linceo.core.policy import ToolSkip, apply_exclusions, split_tool_skips
 from linceo.core.ports import ContextProvider, ToolExecutor, ToolIntegration
 from linceo.core.results import RunResult, RunStatus
+from linceo.core.tool_config import ToolConfig
 
 
 def _execute_one(
@@ -32,10 +33,20 @@ def _execute_one(
     *,
     executor: ToolExecutor,
     workspace_path: str,
+    argv: tuple[str, ...],
     normalizer: SeverityNormalizer,
     skip: ToolSkip | None,
+    timeout: float | None,
 ) -> ToolExecution:
     """Run and normalize one `ToolIntegration`'s execution, absorbing its failures.
+
+    `argv` arrives already built by `run()`, below — every integration's
+    `build_command` has already been called, and any
+    `UnsupportedToolConfigError` it could raise (ADR §8.5) has already had
+    its chance to, before this function (or any real subprocess) runs at
+    all. `timeout` is `ToolConfig.timeout` for this tool, enforced here by
+    `executor.run` alone — never translated into a flag inside `argv`
+    itself (see `ToolConfig.timeout`).
 
     When `skip` is not `None`, the tool is never invoked at all — the
     execution is `SKIPPED_BY_POLICY` (ADR §5, §8), a declared and caducable
@@ -49,7 +60,10 @@ def _execute_one(
     message is produced (ADR §1 checkpoint; no separate preflight
     duplicates this detection elsewhere). Any other failure to run, parse,
     or normalize becomes `ExecutionStatus.FAILED` — both are *absence of
-    evidence*, not "zero findings" (ADR §5).
+    evidence*, not "zero findings" (ADR §5). This is also where a
+    `subprocess.TimeoutExpired` (or any other `TimeoutError`) from an
+    elapsed `timeout` lands: a timed-out tool produced no usable evidence
+    either, the same as a crash.
     """
     if skip is not None:
         return ToolExecution(
@@ -65,10 +79,8 @@ def _execute_one(
             data_sources=(),
         )
 
-    argv = tuple(integration.build_command(workspace_path=workspace_path))
-
     try:
-        process_result = executor.run(argv, env={}, cwd=workspace_path)
+        process_result = executor.run(argv, env={}, cwd=workspace_path, timeout=timeout)
     except FileNotFoundError:
         return ToolExecution(
             tool=integration.name,
@@ -161,6 +173,16 @@ def run(
     active `ToolSkip` or run, regardless of whether an earlier one failed —
     a run's evidence is only known to be incomplete once every execution
     has been attempted or sanctioned-skipped.
+
+    Raises:
+        UnsupportedToolConfigError: if any non-skipped integration's
+            `build_command` rejects its resolved `ToolConfig` (ADR §8.5).
+            Raised here, before any tool is actually invoked — every
+            argv is built up front, in this one pass, precisely so a
+            configuration error surfaces before N-1 other tools in this
+            same run already executed for real (ADR §8.4's "se valida...
+            antes de invocar ninguna herramienta", extended to per-tool
+            configuration).
     """
     context = context_provider.resolve()
     effective_normalizer = replace(normalizer, strict=config.strict_normalization)
@@ -169,14 +191,31 @@ def run(
     active_skips, expired_skips = split_tool_skips(config.policy.tool_skips, today=today)
     skip_by_tool = {skip.tool: skip for skip in active_skips}
 
+    tool_configs_by_tool = {
+        integration.name: config.tool_configs.get(integration.name, ToolConfig())
+        for integration in integrations.values()
+    }
+    argv_by_category: dict[Category, tuple[str, ...]] = {
+        category: tuple(
+            integration.build_command(
+                workspace_path=context.workspace_path,
+                config=tool_configs_by_tool[integration.name],
+            )
+        )
+        for category, integration in integrations.items()
+        if skip_by_tool.get(integration.name) is None
+    }
+
     executions = tuple(
         _execute_one(
             category,
             integration,
             executor=executor,
             workspace_path=context.workspace_path,
+            argv=argv_by_category.get(category, ()),
             normalizer=effective_normalizer,
             skip=skip_by_tool.get(integration.name),
+            timeout=tool_configs_by_tool[integration.name].timeout,
         )
         for category, integration in integrations.items()
     )

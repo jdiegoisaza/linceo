@@ -28,6 +28,7 @@ from linceo.core.ports import ProcessResult, ToolExecutor
 from linceo.core.report_schema import Column, ReportSchema
 from linceo.core.results import RunResult, RunStatus
 from linceo.core.severity import Severity
+from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError
 from linceo.testing import FakeContextProvider, FakeToolExecutor
 
 _NOW = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
@@ -59,7 +60,12 @@ class StaticToolIntegration:
     raw_findings: Sequence[RawFinding] = ()
     sources: Sequence[DataSource] = ()
 
-    def build_command(self, *, workspace_path: str) -> Sequence[str]:  # noqa: ARG002
+    def build_command(
+        self,
+        *,
+        workspace_path: str,  # noqa: ARG002
+        config: ToolConfig,  # noqa: ARG002
+    ) -> Sequence[str]:
         return self.argv
 
     def parse_output(self, _result: ProcessResult) -> Sequence[RawFinding]:
@@ -355,3 +361,70 @@ def test_expired_tool_skip_lets_the_tool_run_again() -> None:
     assert result.executions[0].status is ExecutionStatus.COMPLETED
     assert result.applied_tool_skips == ()
     assert result.expired_tool_skips == (skip,)
+
+
+# --- per-integration configuration (ADR §8.5) --------------------------------
+
+
+def test_tool_config_timeout_is_threaded_through_to_the_executor() -> None:
+    gitleaks = StaticToolIntegration(
+        name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+    config = Config(tool_configs={"gitleaks": ToolConfig(timeout=42.0)})
+
+    _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=config)
+
+    [(_argv, _env, _cwd, timeout)] = executor.calls
+    assert timeout == 42.0
+
+
+def test_an_unconfigured_tool_gets_the_all_default_tool_config() -> None:
+    """No `[tools.<name>]` entry at all means `ToolConfig()`'s own defaults — `timeout=None`."""
+    gitleaks = StaticToolIntegration(
+        name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+
+    _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=Config())
+
+    [(_argv, _env, _cwd, timeout)] = executor.calls
+    assert timeout is None
+
+
+def test_unsupported_tool_config_aborts_the_run_before_any_tool_executes() -> None:
+    """`UnsupportedToolConfigError` (ADR §8.5) surfaces before a single tool actually runs —
+
+    every integration's `build_command` is called up front, so a rejection from *any* one of
+    them — even one that isn't first — must stop the run before the *other* one, which would
+    have succeeded, ever reaches `executor.run` (ADR §8.4's validate-before-invoking principle,
+    extended to per-tool configuration).
+    """
+
+    @dataclass
+    class _PickyIntegration(StaticToolIntegration):
+        def build_command(
+            self,
+            *,
+            workspace_path: str,  # noqa: ARG002
+            config: ToolConfig,  # noqa: ARG002
+        ) -> Sequence[str]:
+            msg = "this tool never honors any configuration at all"
+            raise UnsupportedToolConfigError(msg)
+
+    gitleaks = StaticToolIntegration(
+        name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
+    )
+    picky = _PickyIntegration(
+        name="trivy", version="0.50.0", category=Category.SCA, argv=("trivy", "fs")
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+
+    with pytest.raises(UnsupportedToolConfigError):
+        _run(
+            integrations={Category.SECRETS: gitleaks, Category.SCA: picky},
+            executor=executor,
+            config=Config(),
+        )
+
+    assert executor.calls == []

@@ -23,6 +23,7 @@ from linceo.adapters.gitleaks import (
 )
 from linceo.core.findings import Category
 from linceo.core.ports import ProcessResult
+from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError
 from linceo.testing import FakeToolExecutor
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "gitleaks"
@@ -40,7 +41,7 @@ def _load(name: str) -> str:
 def test_build_command_is_a_list_argv_scanning_workspace_path() -> None:
     integration = GitleaksIntegration(version="8.30.1")
 
-    argv = integration.build_command(workspace_path="/workspace/widgets")
+    argv = integration.build_command(workspace_path="/workspace/widgets", config=ToolConfig())
 
     assert argv == (
         "gitleaks",
@@ -54,6 +55,98 @@ def test_build_command_is_a_list_argv_scanning_workspace_path() -> None:
         "--no-banner",
     )
     assert all(isinstance(part, str) for part in argv)
+
+
+# --- per-integration configuration (ADR §8.5) --------------------------------
+
+
+def test_default_config_scans_history_exactly_like_before(tmp_path: Path) -> None:
+    """`ToolConfig()`'s `scan_history=None` must not change gitleaks' own default (ADR §10)."""
+    integration = GitleaksIntegration(version="8.30.1")
+
+    argv = integration.build_command(workspace_path=str(tmp_path), config=ToolConfig())
+
+    assert "--no-git" not in argv
+
+
+def test_scan_history_false_adds_no_git() -> None:
+    integration = GitleaksIntegration(version="8.30.1")
+
+    argv = integration.build_command(
+        workspace_path="/workspace/widgets", config=ToolConfig(scan_history=False)
+    )
+
+    assert "--no-git" in argv
+
+
+def test_scan_history_true_does_not_add_no_git() -> None:
+    """`True` is explicit, but identical in effect to gitleaks' own default — no flag needed."""
+    integration = GitleaksIntegration(version="8.30.1")
+
+    argv = integration.build_command(
+        workspace_path="/workspace/widgets", config=ToolConfig(scan_history=True)
+    )
+
+    assert "--no-git" not in argv
+
+
+def test_custom_rules_path_adds_the_config_flag() -> None:
+    integration = GitleaksIntegration(version="8.30.1")
+
+    argv = integration.build_command(
+        workspace_path="/workspace/widgets",
+        config=ToolConfig(custom_rules_path="/etc/linceo/gitleaks-custom.toml"),
+    )
+
+    assert "--config" in argv
+    assert argv[argv.index("--config") + 1] == "/etc/linceo/gitleaks-custom.toml"
+
+
+def test_exclude_paths_raises_unsupported_tool_config_error() -> None:
+    """gitleaks has no CLI flag to exclude paths — a real gap, not a stand-in (ADR §8.5)."""
+    integration = GitleaksIntegration(version="8.30.1")
+
+    with pytest.raises(UnsupportedToolConfigError, match="no command-line flag"):
+        integration.build_command(
+            workspace_path="/workspace/widgets",
+            config=ToolConfig(exclude_paths=("vendor/", "*.min.js")),
+        )
+
+
+def test_passthrough_flags_are_appended_in_declared_order() -> None:
+    integration = GitleaksIntegration(version="8.30.1")
+
+    argv = integration.build_command(
+        workspace_path="/workspace/widgets",
+        config=ToolConfig(
+            passthrough={
+                "redact": 50,
+                "no-color": True,
+                "verbose": False,
+                "enable-rule": ("a", "b"),
+            }
+        ),
+    )
+
+    tail = argv[-7:]
+    assert tail == ("--redact", "50", "--no-color", "--enable-rule", "a", "--enable-rule", "b")
+    assert "--verbose" not in argv  # False omits the flag entirely (a presence flag, not a value)
+
+
+def test_passthrough_can_override_a_level_1_derived_flag() -> None:
+    """Passthrough is appended last, so it wins on a colliding flag (ADR §8.5's accepted cost)."""
+    integration = GitleaksIntegration(version="8.30.1")
+
+    argv = integration.build_command(
+        workspace_path="/workspace/widgets",
+        config=ToolConfig(
+            custom_rules_path="/level1.toml",
+            passthrough={"config": "/level2-override.toml"},
+        ),
+    )
+
+    configs = [argv[i + 1] for i, element in enumerate(argv) if element == "--config"]
+    assert configs == ["/level1.toml", "/level2-override.toml"]
 
 
 def test_name_category_and_version_match_the_protocol_fields() -> None:
@@ -209,10 +302,11 @@ def test_detect_version_runs_gitleaks_version_and_returns_stripped_stdout() -> N
     version = GitleaksIntegration.detect_version(executor)
 
     assert version == "8.30.1"
-    [(argv, env, cwd)] = executor.calls
+    [(argv, env, cwd, timeout)] = executor.calls
     assert tuple(argv) == (GITLEAKS_BINARY, "version")
     assert env == {}
     assert cwd == "."
+    assert timeout is None
 
 
 def test_detect_version_propagates_file_not_found_for_a_missing_binary() -> None:

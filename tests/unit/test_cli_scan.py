@@ -371,3 +371,77 @@ def test_continue_on_tool_error_overrides_a_missing_binary_to_exit_ok(
 
     assert result.exit_code == EXIT_OK
     assert "gitleaks binary not found on PATH" in result.output
+
+
+# --- per-integration configuration (ADR §8.5) --------------------------------
+
+
+def test_dry_run_reflects_a_scan_history_false_tool_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--dry-run` shows the *effective* argv — level 1 config included, not just the base one."""
+    repo = _init_repo(tmp_path / "widgets")
+    monkeypatch.setattr("linceo.cli.scan.SubprocessToolExecutor", _stub_executor_factory({}))
+    config_path = tmp_path / "policy.toml"
+    config_path.write_text("[tools.gitleaks]\nscan_history = false\n")
+
+    result = runner.invoke(
+        app, ["scan", "secrets", "--path", str(repo), "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0
+    assert "--no-git" in result.output
+
+
+def test_dry_run_reflects_passthrough_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    monkeypatch.setattr("linceo.cli.scan.SubprocessToolExecutor", _stub_executor_factory({}))
+    config_path = tmp_path / "policy.toml"
+    config_path.write_text("[tools.gitleaks]\nredact = 25\n")
+
+    result = runner.invoke(
+        app, ["scan", "secrets", "--path", str(repo), "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0
+    assert "--redact 25" in result.output
+
+
+def test_dry_run_reports_an_unsupported_tool_config_as_a_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gitleaks has no flag for `exclude_paths` — ADR §8.5's "say so explicitly" rule."""
+    repo = _init_repo(tmp_path / "widgets")
+    monkeypatch.setattr("linceo.cli.scan.SubprocessToolExecutor", _stub_executor_factory({}))
+    config_path = tmp_path / "policy.toml"
+    config_path.write_text('[tools.gitleaks]\nexclude_paths = ["vendor/"]\n')
+
+    result = runner.invoke(
+        app, ["scan", "secrets", "--path", str(repo), "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "Configuration error" in result.output
+    assert "no command-line flag" in result.output
+
+
+def test_an_unsupported_tool_config_on_a_real_run_never_invokes_the_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rejection happens before any tool runs (ADR §8.4/§8.5) — code 2, not code 3."""
+    repo = _init_repo(tmp_path / "widgets")
+    monkeypatch.setattr(
+        "linceo.cli.scan.SubprocessToolExecutor",
+        _stub_executor_factory({("gitleaks", "version"): _VERSION_RESULT}),
+    )
+    config_path = tmp_path / "policy.toml"
+    config_path.write_text('[tools.gitleaks]\nexclude_paths = ["vendor/"]\n')
+
+    result = runner.invoke(
+        app, ["scan", "secrets", "--path", str(repo), "--config", str(config_path)]
+    )
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "Configuration error" in result.output

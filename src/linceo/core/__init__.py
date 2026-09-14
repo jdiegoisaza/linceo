@@ -53,6 +53,13 @@ from linceo.core.report_schema import Column, ReportSchema, Truncate
 from linceo.core.reporters import render_console, render_json
 from linceo.core.results import RunResult, RunStatus, ThresholdBreach, Verdict
 from linceo.core.severity import SEVERITY_ORDER, Severity, SeveritySource
+from linceo.core.tool_config import (
+    PassthroughValue,
+    ToolConfig,
+    UnsupportedToolConfigError,
+    parse_tool_configs,
+    render_passthrough_flags,
+)
 
 __all__ = [
     "CONTEXT_PROVIDER_ENTRY_POINT_GROUP",
@@ -76,6 +83,7 @@ __all__ = [
     "Finding",
     "Location",
     "Package",
+    "PassthroughValue",
     "Platform",
     "PluginRegistry",
     "Policy",
@@ -91,6 +99,7 @@ __all__ = [
     "ThresholdBreach",
     "ThresholdResolution",
     "Thresholds",
+    "ToolConfig",
     "ToolExecution",
     "ToolExecutor",
     "ToolIntegration",
@@ -98,6 +107,7 @@ __all__ = [
     "Truncate",
     "UnknownPluginError",
     "UnresolvedSeverityError",
+    "UnsupportedToolConfigError",
     "Verdict",
     "apply_exclusions",
     "compute_exit_code",
@@ -106,8 +116,10 @@ __all__ = [
     "evaluate_gate",
     "load_config",
     "normalize_finding",
+    "parse_tool_configs",
     "render_console",
     "render_json",
+    "render_passthrough_flags",
     "run",
     "thresholds_from_fail_on",
 ]

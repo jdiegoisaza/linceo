@@ -1358,6 +1358,167 @@ futuro: hoy solo `1` es válido, y cualquier otro valor es error de configuraci�
 explícito — la plomería de una fuente remota es trabajo posterior deliberadamente
 aplazado (§14); el esquema difícil de acertar es este.
 
+### §8.5. Configuración por integración: dos niveles
+
+Hasta esta revisión, `GitleaksIntegration.build_command` construía un argv fijo y no
+aceptaba ningún parámetro: ni una ruta a excluir, ni una regla propia, ni un timeout.
+Cerrar esto antes de Trivy —el segundo consumidor del contrato— es la misma lógica
+del checkpoint de §1: lo que hoy parece "Gitleaks no necesita más" fosiliza como "el
+contrato no soporta más" en cuanto una segunda herramienta lo copia.
+
+**Elegido: un contrato de configuración en dos niveles**, ninguno de los dos con
+equivalente en flag ni en variable de entorno — exactamente la misma excepción a la
+cadena de §5/R5 que §8.4 ya declaró para exclusiones y omisión de herramienta, y por
+el mismo motivo: ninguna de las formas involucradas (una lista de patrones, una ruta
+local, una tabla arbitraria por herramienta) cabe mejor en un flag escalar de lo que
+ya cabían las exclusiones. Ambos niveles se resuelven exclusivamente desde el mismo
+documento de política, bajo `[tools.<nombre>]`.
+
+#### Nivel 1 — parámetros normalizados
+
+Cuatro campos, con el mismo nombre y el mismo significado para cualquier
+integración, declarados en `core/` (`linceo.core.tool_config.ToolConfig`):
+
+| Campo | Significado |
+|---|---|
+| `exclude_paths` | Rutas o patrones que la herramienta no debe escanear. |
+| `scan_history` | `true` cubre el historial completo, `false` solo el árbol de trabajo, ausente (`None`) deja el default propio de la integración (Gitleaks: historial completo, ver §10). |
+| `custom_rules_path` | Ruta local a reglas propias de la herramienta. |
+| `timeout` | Segundos antes de matar la ejecución — ver el apartado dedicado, abajo. |
+
+**Regla dura: una integración que no puede honrar un campo lo dice, nunca lo ignora
+en silencio.** `build_command` traduce cada campo que su herramienta soporta
+realmente a un flag propio, y levanta `UnsupportedToolConfigError` —nunca construye
+un comando que en la práctica escanea de más o de menos sin decirlo— en cuanto el
+campo se aparte de su valor neutro. El caso real, no hipotético, que motiva esta
+regla: Gitleaks **no tiene ningún flag de línea de comandos para excluir rutas** —
+solo una tabla `[allowlist]` dentro de su propio fichero `--config`, que esta
+integración no genera. `GitleaksIntegration.build_command` levanta
+`UnsupportedToolConfigError` en cuanto `exclude_paths` no está vacío, en vez de
+construir un `gitleaks detect` que en realidad escanea el árbol entero igual.
+Verificado contra el binario 8.30.1 instalado (el mismo con el que están grabados
+los fixtures dorados de §11) con `gitleaks detect --help`, no contra documentación de
+terceros.
+
+`scan_history`, para una categoría sin ninguna noción de historial —un escaneo de
+manifiestos de dependencias, que solo puede reflejar el árbol tal como está en un
+momento dado— no tiene nada que alternar: una integración así deja el campo en su
+default (`None`, "no se pidió nada") sin levantar error, pero levanta
+`UnsupportedToolConfigError` en cuanto un documento lo fija explícitamente a `true` o
+a `false`, porque ninguno de los dos valores puede honrarse con honestidad.
+
+#### `timeout`: por qué nunca es un flag de la herramienta, ni siquiera cuando existe uno
+
+**Elegido: `timeout` nunca se traduce a un flag — se aplica una sola vez, en el
+puerto `ToolExecutor.run`, matando el proceso del sistema operativo al vencer el
+plazo, igual para cualquier herramienta.**
+
+**Alternativa descartada, comprobada y no solo asumida: traducirlo al flag nativo de
+cada herramienta cuando exista uno.** Gitleaks sí tiene uno —`--timeout`, confirmado
+en el binario 8.30.1 instalado—, así que la alternativa no se descarta por
+inexistente, sino a pesar de existir. El flag propio de una herramienta es una
+garantía *blanda*: depende de que esa herramienta note el vencimiento en todos sus
+caminos de código internos, y no toda herramienta tiene uno — normalizar un campo
+para que signifique cosas distintas, con fiabilidad distinta, según qué integración
+lo lea, es exactamente lo que "normalizado" no debería permitir. El límite del propio
+`ToolExecutor` es una garantía *dura*: el proceso se mata, siempre, sin depender de
+que la herramienta coopere. Ejecutar ambos a la vez —el flag propio y el límite del
+executor— tampoco se adopta: cuál de los dos dispara primero depende del arranque de
+cada binario, y produciría un `ExecutionStatus` distinto (fallo capturado por la
+propia herramienta frente a `TimeoutExpired` del executor) de forma no determinista
+para el mismo `timeout` configurado, violando el corolario de determinismo de R3.
+
+#### Nivel 2 — passthrough específico de herramienta
+
+Bajo el mismo bloque `[tools.<nombre>]`, cualquier clave que no sea una de las cuatro
+de nivel 1 se trata como passthrough: se valida solo su *forma* (un escalar de TOML,
+o una lista homogénea de cadenas para un flag repetible — nunca una tabla anidada) y
+se entrega a `build_command` tal cual, sin que `core/` interprete su significado.
+
+**Esto rompe deliberadamente la portabilidad entre escáneres de la misma categoría,
+que es la propuesta de valor central declarada en §8** ("cambiar de escáner de
+secretos mañana no debería exigir tocar la definición del pipeline"). Un documento
+que solo usa nivel 1 escanea de forma idéntica sin importar qué `--tool` resuelva la
+categoría; uno que usa `passthrough` no, por construcción, porque sus claves solo
+significan algo para la herramienta nombrada en ese bloque — cambiar de escáner deja
+ese bloque entero sin efecto o, peor, con un efecto distinto si la nueva herramienta
+por casualidad reconoce las mismas claves con otro significado. Se ofrece de todos
+modos porque la alternativa —un nivel 1 que intente anticipar cada flag de cada
+herramienta presente y futura— es exactamente la superficie sin límite natural que
+§13.1 ya descarta como riesgo de deriva de alcance. El costo se paga explícitamente,
+a cambio de no bloquear a un operador que necesita, hoy, un flag que el nivel 1
+todavía no contempla.
+
+#### Construcción de argv controlada: ningún valor inyecta argumentos por concatenación
+
+**Invariante duro:** un documento de política no puede convertirse en ejecución de
+comandos arbitraria, ni siquiera si el propio documento es malicioso o está
+comprometido. Como ya vale para el resto del proyecto (§9), no hay shell involucrado
+— `argv` es siempre una lista pasada directamente a `exec`, nunca una cadena
+interpretada — así que el riesgo real no es inyección de shell, sino inyección de
+*argumentos*: un valor de passthrough que, mal construido, se divida o se concatene
+en más tokens de los que declara, colando flags que el operador nunca pidió dentro de
+la invocación de la herramienta.
+
+`linceo.core.tool_config.render_passthrough_flags` es el mecanismo compartido —no
+cada integración reinventando su propio manejo de cadenas— que hace esa garantía
+mecánica: cada entrada `(clave, valor)` produce exactamente un token de flag y, si el
+valor no es booleano, exactamente un token de valor por elemento — nunca más, sea lo
+que sea que el valor contenga. Un valor nunca se divide (`.split()` o equivalente);
+nunca se concatena dentro de un token existente. La clave, además, se valida contra
+un patrón de nombre de flag (`^[A-Za-z][A-Za-z0-9-]*$`) antes de usarse, así que una
+clave de TOML entre comillas con espacios u otros caracteres no válidos falla de
+forma ruidosa en vez de producir un flag con forma extraña. `GitleaksIntegration` usa
+esta función para su propio `passthrough`; se espera que Trivy haga lo mismo.
+
+Passthrough se añade siempre al final del argv, después de los flags que nivel 1 ya
+tradujo — así que puede sobrescribir un flag derivado de nivel 1 si el mismo flag
+subyacente coincide (por ejemplo, `custom_rules_path` y un `passthrough.config` de
+Gitleaks compiten por `--config`; la mayoría de los CLI basados en `cobra`/`pflag` —
+Gitleaks incluido— toman la última ocurrencia). Es el costo aceptado de usar la
+válvula de escape de nivel 2, documentado aquí, no un caso especial que el código
+detecte o impida.
+
+#### Visibilidad: `--dry-run` siempre muestra el argv efectivo
+
+El CLI resuelve el `ToolConfig` de la herramienta activa antes de decidir si
+`--dry-run` está activo, y usa exactamente ese mismo objeto tanto para imprimir el
+argv como para el run real — nunca hay un segundo camino que reconstruya el argv por
+separado para uno de los dos casos. `--dry-run` no es una aproximación de lo que
+correría: es literalmente la misma llamada a `build_command`, con la misma
+configuración resuelta, sin ejecutarla.
+
+#### Validación antes de invocar, extendida a nivel de herramienta
+
+§8.4 ya exige que un documento de política inválido falle con código 2 **antes** de
+invocar ninguna herramienta. `UnsupportedToolConfigError` es la misma clase de fallo
+— una petición del operador que no puede honrarse — así que se sujeta al mismo
+principio: `engine.run` construye el argv de **toda** integración no omitida por
+política, para **todas** las herramientas del run, antes de ejecutar ninguna. Con dos
+herramientas en un mismo run (la invariante de §1: N ejecuciones, un veredicto), que
+la segunda rechace su configuración nunca deja a la primera ya ejecutada de verdad —
+la ejecución real solo empieza una vez que cada `build_command` de este run ya tuvo
+su oportunidad de fallar.
+
+#### Esquema
+
+```toml
+[tools.gitleaks]
+scan_history = false             # solo árbol de trabajo — nunca --no-git por defecto (§10)
+custom_rules_path = ".gitleaks-custom.toml"   # --config
+# exclude_paths = ["vendor/"]    # rechazado: UnsupportedToolConfigError — Gitleaks no tiene flag
+
+# Nivel 2: passthrough — cualquier clave que no sea una de las cuatro de arriba.
+# Rompe portabilidad entre escáneres de secretos (§8) — documentado, no oculto.
+redact = 25
+no-color = true
+```
+
+`Config.tool_configs` es un `Mapping[str, ToolConfig]` indexado por
+`ToolIntegration.name`, igual que `skip_by_tool` en `engine.run` ya indexa
+`ToolSkip` por nombre de herramienta — una herramienta sin bloque `[tools.<nombre>]`
+recibe `ToolConfig()`, sus propios defaults neutros, nunca un error por ausencia.
+
 ---
 
 ## §9. Credenciales: el flag nombra el origen, nunca el valor

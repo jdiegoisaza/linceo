@@ -21,9 +21,10 @@ from linceo.adapters.subprocess_executor import SubprocessToolExecutor
 from linceo.core.config import Config
 from linceo.core.engine import run
 from linceo.core.execution import ExecutionStatus
-from linceo.core.findings import Category
+from linceo.core.findings import Category, RawFinding
 from linceo.core.normalization import SeverityNormalizer
 from linceo.core.results import RunStatus
+from linceo.core.tool_config import ToolConfig
 from linceo.providers.local import LocalContextProvider
 
 pytestmark = pytest.mark.integration
@@ -64,7 +65,10 @@ def test_a_clean_repository_produces_no_findings(tmp_path: Path) -> None:
     executor = SubprocessToolExecutor()
     integration = GitleaksIntegration(version=GitleaksIntegration.detect_version(executor))
     process_result = executor.run(
-        integration.build_command(workspace_path=str(repo)), env={}, cwd=str(repo)
+        integration.build_command(workspace_path=str(repo), config=ToolConfig()),
+        env={},
+        cwd=str(repo),
+        timeout=None,
     )
 
     findings = integration.parse_output(process_result)
@@ -82,7 +86,10 @@ def test_a_committed_secret_is_detected_with_its_hash_not_its_plaintext(tmp_path
     executor = SubprocessToolExecutor()
     integration = GitleaksIntegration(version=GitleaksIntegration.detect_version(executor))
     process_result = executor.run(
-        integration.build_command(workspace_path=str(repo)), env={}, cwd=str(repo)
+        integration.build_command(workspace_path=str(repo), config=ToolConfig()),
+        env={},
+        cwd=str(repo),
+        timeout=None,
     )
 
     findings = integration.parse_output(process_result)
@@ -122,3 +129,67 @@ def test_scan_secrets_end_to_end_through_the_engine_against_a_real_repository(
     assert len(result.findings) == 1
     assert result.findings[0].rule_id == "aws-access-token"
     assert result.context.repository == "widgets"
+
+
+# --- per-integration configuration against the real binary (ADR §8.5) --------
+
+
+def test_scan_history_false_misses_a_secret_only_present_in_a_removed_commit(
+    tmp_path: Path,
+) -> None:
+    """`scan_history=False` -> `--no-git`: only the current working tree is scanned."""
+    repo = _init_repo(tmp_path / "history-repo")
+    secret_value = "AKIAQPFM3ZXVJ7HKQZ2A"  # noqa: S105
+    (repo / "config.py").write_text(f'AWS_ACCESS_KEY_ID = "{secret_value}"\n')
+    _commit_all(repo, "add aws config (synthetic test fixture, not a real credential)")
+    (repo / "config.py").write_text("print('cleaned up')\n")
+    _commit_all(repo, "remove the secret")
+
+    executor = SubprocessToolExecutor()
+    integration = GitleaksIntegration(version=GitleaksIntegration.detect_version(executor))
+
+    def _scan(*, config: ToolConfig) -> tuple[RawFinding, ...]:
+        process_result = executor.run(
+            integration.build_command(workspace_path=str(repo), config=config),
+            env={},
+            cwd=str(repo),
+            timeout=None,
+        )
+        return tuple(integration.parse_output(process_result))
+
+    assert len(_scan(config=ToolConfig())) == 1  # full history: the removed secret is still there
+    assert _scan(config=ToolConfig(scan_history=False)) == ()  # working tree only: it's gone
+
+
+def test_custom_rules_path_extends_the_default_rule_set(tmp_path: Path) -> None:
+    """`custom_rules_path` -> `--config`: a rule gitleaks' own defaults don't know about."""
+    repo = _init_repo(tmp_path / "custom-rule-repo")
+    (repo / "app.py").write_text('MY_TOKEN = "CUSTOMTOKEN_AB12345678"\n')
+    _commit_all(repo, "add a custom-shaped token")
+
+    custom_config = tmp_path / "custom-gitleaks.toml"
+    custom_config.write_text(
+        "[extend]\n"
+        "useDefault = true\n"
+        "\n"
+        "[[rules]]\n"
+        'id = "custom-test-token"\n'
+        'description = "Custom test token"\n'
+        "regex = '''CUSTOMTOKEN_[A-Za-z0-9]{10}'''\n"
+    )
+
+    executor = SubprocessToolExecutor()
+    integration = GitleaksIntegration(version=GitleaksIntegration.detect_version(executor))
+
+    def _scan(*, config: ToolConfig) -> tuple[RawFinding, ...]:
+        process_result = executor.run(
+            integration.build_command(workspace_path=str(repo), config=config),
+            env={},
+            cwd=str(repo),
+            timeout=None,
+        )
+        return tuple(integration.parse_output(process_result))
+
+    assert _scan(config=ToolConfig()) == ()  # gitleaks' default rules don't know this shape
+    [finding] = _scan(config=ToolConfig(custom_rules_path=str(custom_config)))
+    assert finding.rule_id == "custom-test-token"

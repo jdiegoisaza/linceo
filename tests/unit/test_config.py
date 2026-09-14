@@ -15,6 +15,7 @@ from linceo.core.config import (
 )
 from linceo.core.policy import ConfigLayer
 from linceo.core.severity import Severity
+from linceo.core.tool_config import ToolConfig
 
 TODAY = date(2026, 9, 13)
 
@@ -547,3 +548,59 @@ def test_tool_skips_load_through_the_config_file(tmp_path: Path) -> None:
     [tool_skip] = config.policy.tool_skips
     assert tool_skip.tool == "gitleaks"
     assert tool_skip.expires_at == date(2026, 10, 1)
+
+
+# --- per-integration configuration loaded through the same file (ADR §8.5) ---
+
+
+def test_tool_configs_load_through_the_config_file(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[tools.gitleaks]\n"
+        "scan_history = false\n"
+        'custom_rules_path = ".gitleaks-custom.toml"\n'
+        "timeout = 120\n"
+        "redact = 50\n"
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    assert config.tool_configs["gitleaks"] == ToolConfig(
+        scan_history=False,
+        custom_rules_path=".gitleaks-custom.toml",
+        timeout=120.0,
+        passthrough={"redact": 50},
+    )
+
+
+def test_no_tools_table_means_no_configured_tools(tmp_path: Path) -> None:
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    assert config.tool_configs == {}
+
+
+def test_an_invalid_tool_config_field_is_a_configuration_error_at_load_time(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text("[tools.gitleaks]\ntimeout = -5\n")
+
+    with pytest.raises(ConfigurationError, match="timeout must be positive"):
+        load_config(
+            explicit_config_path=None,
+            workspace_path=str(tmp_path),
+            package_root=str(tmp_path / "package"),
+            today=TODAY,
+        )

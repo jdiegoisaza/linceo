@@ -43,13 +43,19 @@ class FakeToolExecutor:
     (`FileNotFoundError`) or a crash without needing a real one.
 
     Every call is appended to `calls`, so a test can assert what argv,
-    env, and cwd a caller invoked this fake with.
+    env, cwd, and timeout a caller invoked this fake with — `timeout` is
+    recorded, never enforced: this fake never actually runs anything, so
+    there is nothing for a timeout to bound.
     """
 
     recordings: Mapping[tuple[str, ...], ProcessResult | Exception] = field(default_factory=dict)
-    calls: list[tuple[Sequence[str], Mapping[str, str], str]] = field(default_factory=list)
+    calls: list[tuple[Sequence[str], Mapping[str, str], str, float | None]] = field(
+        default_factory=list
+    )
 
-    def run(self, argv: Sequence[str], *, env: Mapping[str, str], cwd: str) -> ProcessResult:
+    def run(
+        self, argv: Sequence[str], *, env: Mapping[str, str], cwd: str, timeout: float | None
+    ) -> ProcessResult:
         """Return (or raise) the outcome recorded for the longest pattern matching `argv`.
 
         Raises:
@@ -57,7 +63,7 @@ class FakeToolExecutor:
                 `argv` at all — mirroring a real `ToolExecutor` faced with
                 a binary absent from `PATH`.
         """
-        self.calls.append((argv, env, cwd))
+        self.calls.append((argv, env, cwd, timeout))
         argv_tuple = tuple(argv)
         matching = [pattern for pattern in self.recordings if argv_tuple[: len(pattern)] == pattern]
         if not matching:

@@ -23,6 +23,7 @@ from linceo.core.findings import Category
 from linceo.core.normalization import SeverityNormalizer
 from linceo.core.policy import PolicyConfigurationError
 from linceo.core.reporters import render_console, render_json
+from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError
 from linceo.providers.environment import process_environment
 from linceo.providers.local import ContextResolutionError, LocalContextProvider
 
@@ -136,9 +137,14 @@ def scan_secrets(
         gitleaks_version = "unknown"
 
     integration = GitleaksIntegration(version=gitleaks_version)
+    tool_config = resolved_config.tool_configs.get(integration.name, ToolConfig())
 
     if dry_run:
-        argv = integration.build_command(workspace_path=workspace_path)
+        try:
+            argv = integration.build_command(workspace_path=workspace_path, config=tool_config)
+        except UnsupportedToolConfigError as exc:
+            typer.echo(f"Configuration error: {exc}", err=True)
+            raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
         typer.echo(shlex.join(argv))
         raise typer.Exit(code=0)
 
@@ -156,6 +162,9 @@ def scan_secrets(
         typer.echo(f"Configuration error: {exc}", err=True)
         raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
     except PolicyConfigurationError as exc:
+        typer.echo(f"Configuration error: {exc}", err=True)
+        raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
+    except UnsupportedToolConfigError as exc:
         typer.echo(f"Configuration error: {exc}", err=True)
         raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
 

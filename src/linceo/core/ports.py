@@ -21,6 +21,7 @@ from linceo.core.context import ExecutionContext
 from linceo.core.execution import DataSource
 from linceo.core.findings import Category, RawFinding
 from linceo.core.report_schema import ReportSchema
+from linceo.core.tool_config import ToolConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +64,26 @@ class ToolExecutor(Protocol):
     makes `--dry-run` safe to print `argv` verbatim and lets
     `ToolExecution.argv` (ADR §9) be persisted in a report with no
     redaction step, because the value simply is never there.
+
+    `timeout` (seconds, `None` for no limit) is the one place
+    `ToolConfig.timeout` (ADR §8.5) is actually enforced — at this process
+    boundary, identically for every tool, regardless of whether that tool
+    has a timeout flag of its own. An implementation kills the child
+    process outright once `timeout` elapses; it never delegates that to
+    the tool being run.
     """
 
-    def run(self, argv: Sequence[str], *, env: Mapping[str, str], cwd: str) -> ProcessResult:
-        """Execute `argv` with `env` merged into the child process's environment, run from `cwd`."""
+    def run(
+        self, argv: Sequence[str], *, env: Mapping[str, str], cwd: str, timeout: float | None
+    ) -> ProcessResult:
+        """Execute `argv` with `env` merged into the child process's environment, run from `cwd`.
+
+        Raises:
+            FileNotFoundError: if `argv[0]` cannot be found.
+            TimeoutError: (or a subclass, e.g. `subprocess.TimeoutExpired`)
+                if `timeout` is not `None` and elapses before the process
+                exits.
+        """
         ...
 
 
@@ -145,8 +162,23 @@ class ToolIntegration(Protocol):
         """
         ...
 
-    def build_command(self, *, workspace_path: str) -> Sequence[str]:
-        """Build the argv to invoke this tool against `workspace_path`."""
+    def build_command(self, *, workspace_path: str, config: ToolConfig) -> Sequence[str]:
+        """Build the argv to invoke this tool against `workspace_path`, applying `config`.
+
+        Translates whichever of `config`'s level 1 fields
+        (`exclude_paths`, `scan_history`, `custom_rules_path`) this tool
+        has a real flag for; `config.timeout` is never among them (see
+        `ToolConfig.timeout`). `config.passthrough` (ADR §8.5's level 2)
+        is appended last, exactly as given — an implementation should
+        build it through `linceo.core.tool_config.render_passthrough_flags`
+        rather than its own string handling, so the anti-injection
+        guarantee that function documents actually holds.
+
+        Raises:
+            UnsupportedToolConfigError: if a level 1 field this tool has
+                no equivalent for is set away from its neutral default —
+                never silently ignored (ADR §8.5).
+        """
         ...
 
     def parse_output(self, result: ProcessResult) -> Sequence[RawFinding]:

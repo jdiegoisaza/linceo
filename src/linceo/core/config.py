@@ -25,9 +25,10 @@ chain, but interact differently:
   — one flag should not partially edit a policy file's declared intent.
   When that happens, `ThresholdResolution.superseded` records what was
   replaced, so a report can say so explicitly (ADR §8.1).
-- **Exclusions and tool skips** are file-only for now (ADR §8, §8.2): there
-  is no CLI or environment-variable equivalent, only the policy document's
-  `[[exclusions]]` and `[[skipped_tools]]` sections.
+- **Exclusions, tool skips, and per-tool configuration** are file-only for
+  now (ADR §8, §8.2, §8.5): there is no CLI or environment-variable
+  equivalent, only the policy document's `[[exclusions]]`,
+  `[[skipped_tools]]`, and `[tools.<name>]` sections.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from linceo.core.policy import (
     parse_policy_document,
 )
 from linceo.core.severity import Severity
+from linceo.core.tool_config import ToolConfig, parse_tool_configs
 
 #: Conventional config file location inside the scanned workspace,
 #: resolved only when no explicit `--config` path is given (ADR §5/R5).
@@ -91,6 +93,7 @@ _FILE_TOP_LEVEL_KNOWN_KEYS = frozenset(
         "thresholds",
         "exclusions",
         "skipped_tools",
+        "tools",
     }
 )
 
@@ -125,12 +128,18 @@ class Config:
     `--fail-on` cutoff or a policy file's `[thresholds]` table (ADR §8.1).
     `policy` carries this run's exclusions and temporary tool skips (ADR
     §8.2) — the same file, the same precedence chain, but file-only for
-    now, with no CLI or environment-variable equivalent.
+    now, with no CLI or environment-variable equivalent. `tool_configs`
+    carries every `[tools.<name>]` table, keyed by tool name (ADR §8.5) —
+    file-only in exactly the same sense and for the same reason: none of
+    its shapes (a list of patterns, a local path, an arbitrary per-tool
+    table) fit a scalar CLI flag or environment variable any better than
+    exclusions and tool skips already didn't.
 
     Every field defaults to the permissive, reporting-only choice the ADR
     documents: no gate configured (§8.1), `continue_on_tool_error = False`
     (§5), `strict_normalization = False` (§6), the default 90-day exclusion
-    horizon, and the default 20-row console table (§7, §8.2).
+    horizon, the default 20-row console table (§7, §8.2), and no
+    integration configured beyond its own built-in defaults (§8.5).
     """
 
     threshold_resolution: ThresholdResolution = field(
@@ -141,6 +150,7 @@ class Config:
     max_expiry_horizon_days: int = DEFAULT_MAX_HORIZON_DAYS
     report_max_rows: int = DEFAULT_REPORT_MAX_ROWS
     policy: Policy = field(default_factory=Policy)
+    tool_configs: Mapping[str, ToolConfig] = field(default_factory=dict)
 
 
 def _parse_fail_on(raw: str) -> Severity | None:
@@ -480,6 +490,7 @@ def load_config(
             today=today,
             max_horizon_days=max_expiry_horizon_days,
         )
+        tool_configs = parse_tool_configs(raw_document)
     except PolicyConfigurationError as exc:
         raise ConfigurationError(str(exc)) from exc
 
@@ -497,4 +508,5 @@ def load_config(
         max_expiry_horizon_days=max_expiry_horizon_days,
         report_max_rows=report_max_rows,
         policy=Policy(exclusions=policy_document.exclusions, tool_skips=policy_document.tool_skips),
+        tool_configs=tool_configs,
     )

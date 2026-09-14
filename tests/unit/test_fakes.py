@@ -29,7 +29,7 @@ def test_fake_tool_executor_replays_a_recorded_process_result() -> None:
     recorded = ProcessResult(exit_code=0, stdout="[]", stderr="", started_at=now, finished_at=now)
     executor = FakeToolExecutor(recordings={("gitleaks", "detect"): recorded})
 
-    result = executor.run(["gitleaks", "detect"], env={}, cwd="/workspace")
+    result = executor.run(["gitleaks", "detect"], env={}, cwd="/workspace", timeout=None)
 
     assert result is recorded
 
@@ -38,14 +38,14 @@ def test_fake_tool_executor_raises_file_not_found_for_an_unrecorded_binary() -> 
     executor = FakeToolExecutor()
 
     with pytest.raises(FileNotFoundError, match="trivy"):
-        executor.run(["trivy", "fs"], env={}, cwd="/workspace")
+        executor.run(["trivy", "fs"], env={}, cwd="/workspace", timeout=None)
 
 
 def test_fake_tool_executor_raises_a_recorded_exception() -> None:
     executor = FakeToolExecutor(recordings={("gitleaks",): TimeoutError("scan timed out")})
 
     with pytest.raises(TimeoutError, match="timed out"):
-        executor.run(["gitleaks", "detect"], env={}, cwd="/workspace")
+        executor.run(["gitleaks", "detect"], env={}, cwd="/workspace", timeout=None)
 
 
 def test_fake_tool_executor_records_every_call() -> None:
@@ -53,9 +53,11 @@ def test_fake_tool_executor_records_every_call() -> None:
     recorded = ProcessResult(exit_code=0, stdout="", stderr="", started_at=now, finished_at=now)
     executor = FakeToolExecutor(recordings={("gitleaks", "detect"): recorded})
 
-    executor.run(["gitleaks", "detect", "--source", "."], env={"FOO": "bar"}, cwd="/workspace")
+    executor.run(
+        ["gitleaks", "detect", "--source", "."], env={"FOO": "bar"}, cwd="/workspace", timeout=30.0
+    )
 
-    expected_call = (["gitleaks", "detect", "--source", "."], {"FOO": "bar"}, "/workspace")
+    expected_call = (["gitleaks", "detect", "--source", "."], {"FOO": "bar"}, "/workspace", 30.0)
     assert executor.calls == [expected_call]
 
 
@@ -79,5 +81,8 @@ def test_fake_tool_executor_distinguishes_two_purposes_of_the_same_binary() -> N
         }
     )
 
-    assert executor.run(["gitleaks", "version"], env={}, cwd=".") is version_result
-    assert executor.run(["gitleaks", "detect", "--source", "."], env={}, cwd=".") is detect_result
+    assert executor.run(["gitleaks", "version"], env={}, cwd=".", timeout=None) is version_result
+    assert (
+        executor.run(["gitleaks", "detect", "--source", "."], env={}, cwd=".", timeout=None)
+        is detect_result
+    )

@@ -4,6 +4,8 @@ Deliberately thin (ADR §13.1): builds the `gitleaks detect` command line
 and parses its JSON report into `RawFinding`s, nothing more — no severity
 normalization (gitleaks emits none natively at all, ADR §6) and no
 provenance bookkeeping beyond what `RawFinding.tool` already carries.
+`build_command` also translates the level 1 configuration contract (ADR
+§8.5) into gitleaks' own flags — see `GitleaksIntegration.build_command`.
 
 `RawFinding.secret_hash` is a SHA-256 hex digest of gitleaks' own `Secret`
 field: read from the parsed JSON just long enough to hash, and never
@@ -22,6 +24,7 @@ from linceo.core.execution import DataSource
 from linceo.core.findings import Category, Location, RawFinding
 from linceo.core.ports import ProcessResult, ToolExecutor
 from linceo.core.report_schema import Column, ReportSchema, Truncate
+from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError, render_passthrough_flags
 
 #: The `secrets` category's report table contract (ADR §7): `LOCATION` is
 #: `path:line`, truncated from the left so a long path still ends in its
@@ -78,11 +81,13 @@ class GitleaksOutputError(Exception):
 class GitleaksIntegration:
     """Thin `ToolIntegration` adapter around `gitleaks detect --report-format json` (ADR §10).
 
-    Scans the workspace's full git history (gitleaks' default mode, not
-    `--no-git`) rather than only the current working tree: a secret
-    committed and later removed is exactly the case a secrets scanner
-    earns its keep on, and `workspace_path` is already guaranteed to be a
-    git checkout by every `ContextProvider` in scope for v0.1 (ADR §10).
+    Scans the workspace's full git history by default (gitleaks' own
+    default mode, not `--no-git`) rather than only the current working
+    tree: a secret committed and later removed is exactly the case a
+    secrets scanner earns its keep on, and `workspace_path` is already
+    guaranteed to be a git checkout by every `ContextProvider` in scope
+    for v0.1 (ADR §10). `build_command`'s `config` (ADR §8.5) can override
+    this per run via `scan_history=False`.
 
     `version` is supplied by the caller — typically the real installed
     version detected via `detect_version` before this integration is even
@@ -107,16 +112,46 @@ class GitleaksIntegration:
                 the actionable signal a caller (typically the CLI) turns
                 into `missing_binary_hint` (ADR R4).
         """
-        result = executor.run((GITLEAKS_BINARY, "version"), env={}, cwd=".")
+        result = executor.run((GITLEAKS_BINARY, "version"), env={}, cwd=".", timeout=None)
         return result.stdout.strip()
 
     def missing_binary_hint(self) -> str:
         """Satisfy `ToolIntegration.missing_binary_hint` with gitleaks' own actionable text."""
         return GITLEAKS_MISSING_BINARY_HINT
 
-    def build_command(self, *, workspace_path: str) -> Sequence[str]:
-        """Build the `gitleaks detect` argv against `workspace_path` (list argv, no shell)."""
-        return (
+    def build_command(self, *, workspace_path: str, config: ToolConfig) -> Sequence[str]:
+        """Build the `gitleaks detect` argv against `workspace_path`, applying `config` (ADR §8.5).
+
+        Translates the two level 1 fields gitleaks has a real flag for:
+        `scan_history=False` appends `--no-git`, and `custom_rules_path`
+        appends `--config <path>` (gitleaks' own rule/allowlist file,
+        real flag confirmed against the installed 8.30.1 binary this
+        integration is golden-fixture-tested against). `config.timeout`
+        is never read here — see `ToolConfig.timeout` for why, even
+        though gitleaks happens to have its own `--timeout` flag.
+        `config.passthrough` is appended last, via
+        `render_passthrough_flags`, so it can override either of the two
+        translated flags above if a document's author explicitly wants
+        that (the accepted cost of opting into the level 2 escape hatch,
+        ADR §8.5).
+
+        Raises:
+            UnsupportedToolConfigError: if `config.exclude_paths` is
+                non-empty — gitleaks has no command-line flag to exclude
+                paths from a scan, only a `[allowlist]` table inside its
+                own `--config` file, which this integration does not
+                generate.
+        """
+        if config.exclude_paths:
+            msg = (
+                "gitleaks has no command-line flag to exclude paths from a scan — only a "
+                "[allowlist] table inside its own --config file, which this integration does "
+                "not generate. Remove exclude_paths for gitleaks, or set custom_rules_path to "
+                "a gitleaks config file that declares [allowlist] paths yourself."
+            )
+            raise UnsupportedToolConfigError(msg)
+
+        argv = [
             GITLEAKS_BINARY,
             "detect",
             "--source",
@@ -126,7 +161,13 @@ class GitleaksIntegration:
             "--report-path",
             "-",
             "--no-banner",
-        )
+        ]
+        if config.scan_history is False:
+            argv.append("--no-git")
+        if config.custom_rules_path is not None:
+            argv.extend(("--config", config.custom_rules_path))
+        argv.extend(render_passthrough_flags(config.passthrough))
+        return tuple(argv)
 
     def parse_output(self, result: ProcessResult) -> Sequence[RawFinding]:
         """Parse gitleaks' JSON report (on stdout) into `RawFinding`s.
