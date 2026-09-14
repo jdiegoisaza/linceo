@@ -62,6 +62,15 @@ class ToolExecution:
     — `status = SKIPPED` (e.g. its binary was absent from `PATH`) or
     `status = SKIPPED_BY_POLICY` (an active `ToolSkip`, ADR §8), in which
     case `argv` is also empty: the tool was never even invoked.
+
+    `message` carries the one actionable message a `ToolExecution` needs
+    to surface beyond its structured fields — today, only
+    `ToolIntegration.missing_binary_hint()` when `status = SKIPPED` over a
+    missing binary. `linceo.core.engine` is the single place that sets it;
+    a caller (the CLI) only ever displays it, never re-derives it — the
+    checkpoint fix (ADR §1) that replaced a CLI-side preflight duplicating
+    the same missing-binary detection `engine.run` already performs.
+    `None` for every other status.
     """
 
     tool: str
@@ -74,3 +83,4 @@ class ToolExecution:
     status: ExecutionStatus
     findings: tuple[Finding, ...]
     data_sources: tuple[DataSource, ...]
+    message: str | None = None

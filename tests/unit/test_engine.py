@@ -24,7 +24,7 @@ from linceo.core.findings import Category, Location, Package, RawFinding
 from linceo.core.fingerprint import secret_fingerprint
 from linceo.core.normalization import SeverityNormalizer
 from linceo.core.policy import ConfigLayer, Exclusion, Policy, ThresholdResolution, ToolSkip
-from linceo.core.ports import ProcessResult
+from linceo.core.ports import ProcessResult, ToolExecutor
 from linceo.core.report_schema import Column, ReportSchema
 from linceo.core.results import RunResult, RunStatus
 from linceo.core.severity import Severity
@@ -73,6 +73,13 @@ class StaticToolIntegration:
 
     def report_schema(self) -> ReportSchema:
         return _SCHEMA
+
+    @staticmethod
+    def detect_version(_executor: ToolExecutor) -> str:
+        return "0.0.0"
+
+    def missing_binary_hint(self) -> str:
+        return f"{self.name} binary not found on PATH"
 
 
 def _secret_raw_finding(severity_raw: str | None = None) -> RawFinding:
@@ -125,7 +132,7 @@ def test_exit_code_0_when_the_run_completes_and_the_gate_passes() -> None:
     gitleaks = StaticToolIntegration(
         name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
     )
-    executor = FakeToolExecutor(recordings={"gitleaks": _process_result()})
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
 
     result = _run(
         integrations={Category.SECRETS: gitleaks},
@@ -146,7 +153,7 @@ def test_exit_code_1_when_the_run_completes_and_the_gate_fails() -> None:
         argv=("gitleaks", "detect"),
         raw_findings=(_secret_raw_finding(),),
     )
-    executor = FakeToolExecutor(recordings={"gitleaks": _process_result()})
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
 
     result = _run(
         integrations={Category.SECRETS: gitleaks},
@@ -181,6 +188,7 @@ def test_exit_code_3_when_a_tool_binary_is_missing_and_evidence_is_incomplete() 
 
     assert result.status is RunStatus.PARTIAL
     assert result.executions[0].status is ExecutionStatus.SKIPPED
+    assert result.executions[0].message == gitleaks.missing_binary_hint()
     assert compute_exit_code(result, continue_on_tool_error=False) == EXIT_TOOL_EXECUTION_FAILED
 
 
@@ -189,7 +197,7 @@ def test_executor_crash_marks_the_execution_failed_not_skipped() -> None:
     gitleaks = StaticToolIntegration(
         name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
     )
-    executor = FakeToolExecutor(recordings={"gitleaks": TimeoutError("scan timed out")})
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): TimeoutError("scan timed out")})
 
     result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=Config())
 
@@ -210,7 +218,7 @@ def test_parse_output_failure_marks_the_execution_failed_with_no_findings() -> N
     gitleaks = _BrokenParserIntegration(
         name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
     )
-    executor = FakeToolExecutor(recordings={"gitleaks": _process_result(exit_code=0)})
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result(exit_code=0)})
 
     result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=Config())
 
@@ -252,7 +260,10 @@ def test_two_tool_executions_in_one_run_produce_a_single_aggregated_verdict() ->
         sources=(DataSource(name="trivy-db", version="2026-09-01", built_at=_NOW.date()),),
     )
     executor = FakeToolExecutor(
-        recordings={"gitleaks": _process_result(), "trivy": _process_result()}
+        recordings={
+            ("gitleaks", "detect"): _process_result(),
+            ("trivy", "fs", "."): _process_result(),
+        }
     )
 
     result = _run(
@@ -286,7 +297,7 @@ def test_exclusion_suppresses_a_finding_and_it_does_not_count_for_the_gate() -> 
         argv=("gitleaks", "detect"),
         raw_findings=(_secret_raw_finding(),),
     )
-    executor = FakeToolExecutor(recordings={"gitleaks": _process_result()})
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
     fingerprint = secret_fingerprint(
         rule_id="aws-access-key", path="src/config.py", secret_hash=_SECRET_HASH
     )
@@ -330,7 +341,7 @@ def test_expired_tool_skip_lets_the_tool_run_again() -> None:
     gitleaks = StaticToolIntegration(
         name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
     )
-    executor = FakeToolExecutor(recordings={"gitleaks": _process_result()})
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
     skip = ToolSkip(
         tool="gitleaks",
         reason="Rollout paused while the team triages the initial backlog",

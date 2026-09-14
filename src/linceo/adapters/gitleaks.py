@@ -98,13 +98,21 @@ class GitleaksIntegration:
     def detect_version(executor: ToolExecutor) -> str:
         """Detect the installed gitleaks binary's version via `gitleaks version`.
 
+        Satisfies the `ToolIntegration.detect_version` contract (ADR §1
+        checkpoint): called on the class itself, before any
+        `GitleaksIntegration` instance exists.
+
         Raises:
             FileNotFoundError: if the gitleaks binary is not on `PATH` —
                 the actionable signal a caller (typically the CLI) turns
-                into `GITLEAKS_MISSING_BINARY_HINT` (ADR R4).
+                into `missing_binary_hint` (ADR R4).
         """
         result = executor.run((GITLEAKS_BINARY, "version"), env={}, cwd=".")
         return result.stdout.strip()
+
+    def missing_binary_hint(self) -> str:
+        """Satisfy `ToolIntegration.missing_binary_hint` with gitleaks' own actionable text."""
+        return GITLEAKS_MISSING_BINARY_HINT
 
     def build_command(self, *, workspace_path: str) -> Sequence[str]:
         """Build the `gitleaks detect` argv against `workspace_path` (list argv, no shell)."""

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import typer
 
-from linceo.adapters.gitleaks import GITLEAKS_MISSING_BINARY_HINT, GitleaksIntegration
+from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.adapters.subprocess_executor import SubprocessToolExecutor
 from linceo.core.config import ConfigurationError, load_config
 from linceo.core.engine import run
@@ -126,15 +126,13 @@ def scan_secrets(
     try:
         gitleaks_version = GitleaksIntegration.detect_version(executor)
     except FileNotFoundError:
-        # Printed as a warning, not a hard exit: `engine.run` below still
-        # attempts the same invocation, and its own missing-binary handling
-        # (absence of evidence, ADR §5) already decides the exit code —
-        # consistently with `--continue-on-tool-error`, which this early
-        # check has no business overriding on its own. This is the one
-        # place able to say *why* the binary is missing and how to fix it,
-        # since `ToolExecution`/`ExecutionStatus.SKIPPED` carry no room for
-        # that message (ADR R4).
-        typer.echo(GITLEAKS_MISSING_BINARY_HINT, err=True)
+        # No hint printed here: `engine.run` below attempts the exact same
+        # invocation regardless, and its own missing-binary handling (ADR
+        # §5) is the single place that decides the actionable message a
+        # missing binary produces (ADR §1 checkpoint) — carried on the
+        # resulting `ToolExecution.message` and displayed once `result`
+        # exists, below. This fallback only lets a `GitleaksIntegration` be
+        # constructed at all when its version cannot be detected.
         gitleaks_version = "unknown"
 
     integration = GitleaksIntegration(version=gitleaks_version)
@@ -160,6 +158,10 @@ def scan_secrets(
     except PolicyConfigurationError as exc:
         typer.echo(f"Configuration error: {exc}", err=True)
         raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
+
+    for execution in result.executions:
+        if execution.message is not None:
+            typer.echo(execution.message, err=True)
 
     schemas = {Category.SECRETS: integration.report_schema()}
     report = (

@@ -17,6 +17,7 @@ import pytest
 
 from linceo.adapters.gitleaks import (
     GITLEAKS_BINARY,
+    GITLEAKS_MISSING_BINARY_HINT,
     GitleaksIntegration,
     GitleaksOutputError,
 )
@@ -199,7 +200,7 @@ def test_report_schema_locates_findings_by_path_and_line() -> None:
 def test_detect_version_runs_gitleaks_version_and_returns_stripped_stdout() -> None:
     executor = FakeToolExecutor(
         recordings={
-            GITLEAKS_BINARY: ProcessResult(
+            (GITLEAKS_BINARY, "version"): ProcessResult(
                 exit_code=0, stdout="8.30.1\n", stderr="", started_at=_NOW, finished_at=_NOW
             )
         }
@@ -219,3 +220,9 @@ def test_detect_version_propagates_file_not_found_for_a_missing_binary() -> None
 
     with pytest.raises(FileNotFoundError):
         GitleaksIntegration.detect_version(executor)
+
+
+def test_missing_binary_hint_returns_gitleaks_actionable_install_text() -> None:
+    integration = GitleaksIntegration(version="8.30.1")
+
+    assert integration.missing_binary_hint() == GITLEAKS_MISSING_BINARY_HINT

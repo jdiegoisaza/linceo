@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.cli.main import EXIT_USAGE_ERROR, app
 from linceo.core.exit_codes import (
     EXIT_CONFIGURATION_ERROR,
@@ -34,6 +33,11 @@ from linceo.testing import FakeToolExecutor
 runner = CliRunner()
 _NOW = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
 _FIXTURES = Path(__file__).parent / "fixtures" / "gitleaks"
+#: Recorded once and reused by every scenario that needs `detect_version` to succeed —
+#: the exact version value never matters to these tests, only that one is available.
+_VERSION_RESULT = ProcessResult(
+    exit_code=0, stdout="8.30.1\n", stderr="", started_at=_NOW, finished_at=_NOW
+)
 
 
 def _git(*args: str, cwd: Path) -> None:
@@ -52,24 +56,11 @@ def _init_repo(path: Path) -> Path:
     return path
 
 
-def _stub_executor_factory(recordings: Mapping[str, ProcessResult]) -> object:
+def _stub_executor_factory(recordings: Mapping[tuple[str, ...], ProcessResult]) -> object:
     def factory() -> FakeToolExecutor:
         return FakeToolExecutor(recordings=dict(recordings))
 
     return factory
-
-
-def _stub_detect_version(monkeypatch: pytest.MonkeyPatch, version: str = "8.30.1") -> None:
-    """Bypass version detection entirely, independent of whatever executor is in play.
-
-    `FakeToolExecutor` records one `ProcessResult` per binary name, not per
-    distinct invocation — it cannot tell `gitleaks version` apart from
-    `gitleaks detect ...` against the same recording. Patching
-    `detect_version` directly sidesteps that rather than fighting it.
-    """
-    monkeypatch.setattr(
-        GitleaksIntegration, "detect_version", staticmethod(lambda _executor: version)
-    )
 
 
 def test_missing_gitleaks_binary_prints_actionable_hint_and_exits_3(
@@ -89,15 +80,15 @@ def test_a_finding_at_or_above_fail_on_exits_with_gate_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "widgets")
-    _stub_detect_version(monkeypatch)
     stdout = (_FIXTURES / "one_finding.json").read_text(encoding="utf-8")
     monkeypatch.setattr(
         "linceo.cli.scan.SubprocessToolExecutor",
         _stub_executor_factory(
             {
-                "gitleaks": ProcessResult(
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
                     exit_code=1, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
-                )
+                ),
             }
         ),
     )
@@ -112,15 +103,15 @@ def test_a_finding_at_or_above_fail_on_exits_with_gate_failed(
 
 def test_a_clean_run_with_fail_on_exits_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _init_repo(tmp_path / "widgets")
-    _stub_detect_version(monkeypatch)
     stdout = (_FIXTURES / "empty.json").read_text(encoding="utf-8")
     monkeypatch.setattr(
         "linceo.cli.scan.SubprocessToolExecutor",
         _stub_executor_factory(
             {
-                "gitleaks": ProcessResult(
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
                     exit_code=0, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
-                )
+                ),
             }
         ),
     )
@@ -135,15 +126,15 @@ def test_default_fail_on_none_never_blocks_the_exit_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "widgets")
-    _stub_detect_version(monkeypatch)
     stdout = (_FIXTURES / "one_finding.json").read_text(encoding="utf-8")
     monkeypatch.setattr(
         "linceo.cli.scan.SubprocessToolExecutor",
         _stub_executor_factory(
             {
-                "gitleaks": ProcessResult(
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
                     exit_code=1, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
-                )
+                ),
             }
         ),
     )
@@ -158,15 +149,15 @@ def test_json_format_renders_the_canonical_lossless_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "widgets")
-    _stub_detect_version(monkeypatch)
     stdout = (_FIXTURES / "one_finding.json").read_text(encoding="utf-8")
     monkeypatch.setattr(
         "linceo.cli.scan.SubprocessToolExecutor",
         _stub_executor_factory(
             {
-                "gitleaks": ProcessResult(
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
                     exit_code=1, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
-                )
+                ),
             }
         ),
     )
@@ -183,7 +174,9 @@ def test_json_format_renders_the_canonical_lossless_report(
 def test_dry_run_prints_the_command_without_running_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _stub_detect_version(monkeypatch)
+    # No recording at all: `detect_version` falls back to a placeholder version
+    # silently, and dry-run output never depends on it in the first place.
+    monkeypatch.setattr("linceo.cli.scan.SubprocessToolExecutor", _stub_executor_factory({}))
 
     result = runner.invoke(app, ["scan", "secrets", "--path", str(tmp_path), "--dry-run"])
 
@@ -195,7 +188,7 @@ def test_dry_run_prints_the_command_without_running_anything(
 def test_a_path_that_is_not_a_git_repository_is_a_configuration_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _stub_detect_version(monkeypatch)
+    monkeypatch.setattr("linceo.cli.scan.SubprocessToolExecutor", _stub_executor_factory({}))
     not_a_repo = tmp_path / "not-a-repo"
     not_a_repo.mkdir()
 
@@ -222,15 +215,15 @@ def test_strict_normalization_flag_is_wired_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "widgets")
-    _stub_detect_version(monkeypatch)
     stdout = (_FIXTURES / "empty.json").read_text(encoding="utf-8")
     monkeypatch.setattr(
         "linceo.cli.scan.SubprocessToolExecutor",
         _stub_executor_factory(
             {
-                "gitleaks": ProcessResult(
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
                     exit_code=0, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
-                )
+                ),
             }
         ),
     )
@@ -244,15 +237,15 @@ def test_ambiguous_exclusion_fingerprint_at_run_time_is_a_configuration_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "widgets")
-    _stub_detect_version(monkeypatch)
     stdout = (_FIXTURES / "many_findings.json").read_text(encoding="utf-8")
     monkeypatch.setattr(
         "linceo.cli.scan.SubprocessToolExecutor",
         _stub_executor_factory(
             {
-                "gitleaks": ProcessResult(
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
                     exit_code=1, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
-                )
+                ),
             }
         ),
     )
@@ -274,12 +267,9 @@ def test_ambiguous_exclusion_fingerprint_at_run_time_is_a_configuration_error(
     assert "ambiguous" in result.output
 
 
-def test_fail_on_info_is_rejected_before_it_ever_reaches_the_engine(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fail_on_info_is_rejected_before_it_ever_reaches_the_engine(tmp_path: Path) -> None:
     """ADR §6: INFO never blocks the gate under any threshold configuration."""
     repo = _init_repo(tmp_path / "widgets")
-    _stub_detect_version(monkeypatch)
 
     result = runner.invoke(app, ["scan", "secrets", "--path", str(repo), "--fail-on", "info"])
 
@@ -290,15 +280,15 @@ def test_max_rows_truncates_the_console_table_but_not_the_json_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "widgets")
-    _stub_detect_version(monkeypatch)
     stdout = (_FIXTURES / "many_findings.json").read_text(encoding="utf-8")
     monkeypatch.setattr(
         "linceo.cli.scan.SubprocessToolExecutor",
         _stub_executor_factory(
             {
-                "gitleaks": ProcessResult(
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
                     exit_code=1, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
-                )
+                ),
             }
         ),
     )
@@ -317,15 +307,15 @@ def test_policy_file_exclusion_suppresses_a_finding_and_it_no_longer_fails_the_g
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "widgets")
-    _stub_detect_version(monkeypatch)
     stdout = (_FIXTURES / "one_finding.json").read_text(encoding="utf-8")
     monkeypatch.setattr(
         "linceo.cli.scan.SubprocessToolExecutor",
         _stub_executor_factory(
             {
-                "gitleaks": ProcessResult(
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
                     exit_code=1, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
-                )
+                ),
             }
         ),
     )
@@ -368,10 +358,10 @@ def test_policy_file_exclusion_suppresses_a_finding_and_it_no_longer_fails_the_g
 def test_continue_on_tool_error_overrides_a_missing_binary_to_exit_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The CLI's missing-binary preflight only prints an actionable hint (ADR R4) — it
-    never hard-exits on its own, precisely so `--continue-on-tool-error` still governs the
-    exit code via `engine.run`'s own missing-binary handling, exactly as it would for any
-    other tool execution failure (ADR §5)."""
+    """`engine.run`'s own missing-binary handling (ADR §5) is what prints the actionable
+    hint, via `ToolExecution.message` (ADR §1 checkpoint) — it never hard-exits on its own,
+    precisely so `--continue-on-tool-error` still governs the exit code, exactly as it
+    would for any other tool execution failure."""
     repo = _init_repo(tmp_path / "widgets")
     monkeypatch.setattr("linceo.cli.scan.SubprocessToolExecutor", _stub_executor_factory({}))
 

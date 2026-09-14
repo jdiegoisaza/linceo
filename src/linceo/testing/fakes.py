@@ -30,33 +30,41 @@ class FakeContextProvider:
 class FakeToolExecutor:
     """A `ToolExecutor` that replays a previously recorded outcome instead of running anything.
 
-    Each recording is keyed by the tool binary's name — `argv[0]` — since
-    that is what identifies which real tool run was captured. A recording
-    may be a `ProcessResult` to return, or an `Exception` instance to
-    raise, so a test can simulate a missing binary (`FileNotFoundError`)
-    or a crash without needing a real one.
+    Each recording is keyed by an argv *pattern* — a tuple of leading
+    tokens, e.g. `("gitleaks", "version")` or `("gitleaks", "detect")` —
+    matched against the start of the actual `argv` a caller invokes this
+    fake with; the longest recorded pattern that is a prefix of `argv`
+    wins. Keying by binary name alone (`argv[0]`) could not tell two
+    invocations of the same binary for different purposes apart —
+    `gitleaks version` and `gitleaks detect ...` collided on one shared
+    recording — which is exactly what pattern matching fixes (ADR §1
+    checkpoint). A recording may be a `ProcessResult` to return, or an
+    `Exception` instance to raise, so a test can simulate a missing binary
+    (`FileNotFoundError`) or a crash without needing a real one.
 
     Every call is appended to `calls`, so a test can assert what argv,
     env, and cwd a caller invoked this fake with.
     """
 
-    recordings: Mapping[str, ProcessResult | Exception] = field(default_factory=dict)
+    recordings: Mapping[tuple[str, ...], ProcessResult | Exception] = field(default_factory=dict)
     calls: list[tuple[Sequence[str], Mapping[str, str], str]] = field(default_factory=list)
 
     def run(self, argv: Sequence[str], *, env: Mapping[str, str], cwd: str) -> ProcessResult:
-        """Return (or raise) the outcome recorded for `argv[0]`.
+        """Return (or raise) the outcome recorded for the longest pattern matching `argv`.
 
         Raises:
-            FileNotFoundError: if no recording exists for `argv[0]` at
-                all — mirroring a real `ToolExecutor` faced with a binary
-                absent from `PATH`.
+            FileNotFoundError: if no recorded pattern is a prefix of
+                `argv` at all — mirroring a real `ToolExecutor` faced with
+                a binary absent from `PATH`.
         """
         self.calls.append((argv, env, cwd))
-        binary = argv[0] if argv else ""
-        recorded = self.recordings.get(binary)
-        if recorded is None:
-            msg = f"FakeToolExecutor has no recording for {binary!r}"
+        argv_tuple = tuple(argv)
+        matching = [pattern for pattern in self.recordings if argv_tuple[: len(pattern)] == pattern]
+        if not matching:
+            binary = argv[0] if argv else ""
+            msg = f"FakeToolExecutor has no recording matching {argv_tuple!r} (binary {binary!r})"
             raise FileNotFoundError(msg)
+        recorded = self.recordings[max(matching, key=len)]
         if isinstance(recorded, Exception):
             raise recorded
         return recorded

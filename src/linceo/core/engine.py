@@ -44,9 +44,12 @@ def _execute_one(
 
     A missing binary (`FileNotFoundError`) becomes `ExecutionStatus.SKIPPED`
     — the tool was never invoked at all (ADR R4: a missing tool is an
-    actionable error, never silently retried). Any other failure to run,
-    parse, or normalize becomes `ExecutionStatus.FAILED` — both are
-    *absence of evidence*, not "zero findings" (ADR §5).
+    actionable error, never silently retried) — with `message` set to
+    `integration.missing_binary_hint()`, the single place this actionable
+    message is produced (ADR §1 checkpoint; no separate preflight
+    duplicates this detection elsewhere). Any other failure to run, parse,
+    or normalize becomes `ExecutionStatus.FAILED` — both are *absence of
+    evidence*, not "zero findings" (ADR §5).
     """
     if skip is not None:
         return ToolExecution(
@@ -78,6 +81,7 @@ def _execute_one(
             status=ExecutionStatus.SKIPPED,
             findings=(),
             data_sources=(),
+            message=integration.missing_binary_hint(),
         )
     except Exception:
         return ToolExecution(

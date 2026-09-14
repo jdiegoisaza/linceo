@@ -71,6 +71,53 @@ esquema de configuración quedaron modelados alrededor de las particularidades d
 Gitleaks (que no emite severidad, no tiene CVSS, no referencia paquetes). Corregir
 antes de que Trivy — el segundo consumidor — fosilice el error copiándolo.
 
+#### Resultado del checkpoint, ejecutado tras la integración de Gitleaks (2026-09-13)
+
+Respuesta explícita a la pregunta que este checkpoint exige responder: `Finding`, el
+mapa de severidad y el esquema de configuración superan la revisión sin cambios — nada
+en ellos asume que una herramienta carece de severidad nativa, ni codifica ninguna otra
+particularidad de Gitleaks. El puerto `ToolExecutor` en sí tampoco arrastra sesgo
+alguno: su firma (`argv`, `env`, `cwd` → `ProcessResult`) ya era neutral respecto a qué
+binario se invoca. Donde sí aparecieron cuatro grietas, las cuatro en `core/` y las
+cuatro por la misma causa — generalizar desde un único consumidor real —, fue en el
+contrato de `ToolIntegration` y en las piezas que lo rodean: su doble de pruebas
+(`FakeToolExecutor`) y el modelo de ejecución (`ToolExecution`). Corregidas aquí, antes
+de que Trivy — el segundo consumidor — las fosilizara copiándolas:
+
+1. **`ToolIntegration.name`/`version`/`category` como atributos asignables.** El
+   `Protocol` los declaraba como atributos de instancia planos, lo que exige que toda
+   implementación exponga un atributo mutable — y por tanto impide que una integración
+   sea un dataclass congelado, el patrón que usa el resto del dominio (`ProcessResult`,
+   `DataSource`, `ToolExecution`, `ExecutionContext`). Corregido: los tres se declaran
+   ahora como propiedades de solo lectura en el `Protocol`; un dataclass congelado, un
+   atributo mutable o una propiedad real lo satisfacen igual.
+2. **`detect_version` fuera del contrato.** Gitleaks lo resolvió como un `staticmethod`
+   propio, sin que el `Protocol` dijera nada sobre cuándo ni cómo se obtiene la versión
+   de una herramienta antes de que exista una instancia de su integración — Trivy
+   habría tenido que reinventar la misma solución sin garantía de que coincidiera en
+   firma ni en semántica. Corregido: `detect_version(executor)` es ahora parte
+   explícita de `ToolIntegration`, declarado como método estático del *tipo* — se
+   invoca `NombreIntegration.detect_version(executor)` antes de construir la
+   integración, nunca sobre una instancia — con su contrato de excepciones documentado
+   en el propio `Protocol`.
+3. **`FakeToolExecutor` indexaba solo por nombre de binario.** No distinguía dos
+   invocaciones del mismo binario con propósitos distintos (`gitleaks version` frente a
+   `gitleaks detect`), lo que obligaba a los tests de CLI a sustituir `detect_version`
+   completo por un stub para sortear la limitación del fake, en vez de grabar cada
+   invocación por separado. Corregido: `FakeToolExecutor` indexa ahora por patrón de
+   argv — el prefijo de tokens que identifica la invocación, p. ej. `("gitleaks",
+   "version")` frente a `("gitleaks", "detect")` —, con el patrón más específico que
+   coincide ganando; los tests de CLI ya no necesitan sustituir `detect_version`.
+4. **`ExecutionStatus.SKIPPED` sin un lugar para un mensaje accionable.** El CLI
+   resolvía esto con un preflight propio que repetía, por su cuenta, la misma detección
+   de binario ausente que `engine.run` ya hace internamente — dos caminos para el mismo
+   hecho, uno de ellos silencioso. Corregido: `ToolExecution` lleva ahora un campo
+   `message` opcional, y `ToolIntegration` declara `missing_binary_hint()` como parte
+   de su contrato; `engine._execute_one` es el único lugar que decide cuándo un binario
+   ausente produce un mensaje accionable, y el CLI se limita a mostrar
+   `ToolExecution.message` cuando existe, sin conocer por su cuenta qué herramienta lo
+   produjo ni por qué.
+
 ### No-objetivos explícitos del v0.1
 
 Cada uno con la razón por la que queda fuera, no solo la lista:
@@ -1392,6 +1439,33 @@ implementación de referencia del proyecto con precisamente el caso menos alinea
 R2 (funciona sin salida a internet) de todo el catálogo de Trivy, cuando el objetivo
 de este adaptador es demostrar el contrato en su forma más limpia, no cubrir la mayor
 superficie posible de la herramienta.
+
+### Decisiones tomadas durante la implementación de Gitleaks
+
+Dos decisiones concretas, tomadas al escribir el adaptador y no anticipadas en el
+diseño previo de este documento, registradas aquí porque afectan qué evidencia produce
+el escaneo y qué significa `repository`/`commit` en un run local:
+
+- **Gitleaks escanea el historial completo de git, no solo el árbol de trabajo.** La
+  integración invoca `gitleaks detect` en su modo por defecto — sin `--no-git` — en vez
+  de restringir el escaneo al estado actual del checkout. Un secreto commiteado y luego
+  eliminado del árbol de trabajo sigue siendo un secreto expuesto en el historial
+  público del repositorio desde el momento del `git push`; es exactamente el caso que
+  justifica tener un escáner de secretos en primer lugar, y limitarse al árbol de
+  trabajo lo dejaría fuera por completo. El coste es un escaneo más lento en
+  repositorios con historiales largos, aceptado sin reservas: un secreto no detectado
+  por rapidez es la peor clase de falso negativo posible en esta categoría.
+- **`ExecutionContext.workspace_path` conserva el `--path` del usuario; `repository` y
+  `commit` se resuelven contra la raíz del checkout.** Escanear un subdirectorio de un
+  repositorio más grande debe escanear únicamente ese subdirectorio — `workspace_path`
+  nunca se reescribe hacia la raíz que `git rev-parse --show-toplevel` reporta. Pero
+  `repository` (el nombre derivado del remoto `origin`, o del directorio de nivel
+  superior si no hay remoto) y `commit` (`git rev-parse HEAD`) identifican el
+  repositorio como un todo, no el subdirectorio escaneado, así que se resuelven contra
+  la raíz del checkout — resolverlos contra `workspace_path` produciría de todos modos
+  el mismo `commit` (un repositorio tiene un único `HEAD`), pero un `repository`
+  potencialmente distinto y engañoso si alguna vez se derivara del propio subdirectorio
+  en lugar del remoto configurado.
 
 ---
 
