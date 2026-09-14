@@ -1372,12 +1372,68 @@ cadena de §5/R5 que §8.4 ya declaró para exclusiones y omisión de herramient
 el mismo motivo: ninguna de las formas involucradas (una lista de patrones, una ruta
 local, una tabla arbitraria por herramienta) cabe mejor en un flag escalar de lo que
 ya cabían las exclusiones. Ambos niveles se resuelven exclusivamente desde el mismo
-documento de política, bajo `[tools.<nombre>]`.
+documento de política.
+
+#### Dónde vive nivel 1: dos secciones, con precedencia declarada
+
+Una primera versión de este diseño dejó nivel 1 sin una sección propia en el
+documento: `exclude_paths` en la raíz se rechazaba como campo desconocido, y dentro
+de `[tools.<nombre>]` cualquier clave no reconocida —incluidas, por descuido de
+diseño, las de nivel 1 si se hubieran tratado igual que el resto— habría caído en
+passthrough opaco en vez de en un parámetro validado. Corregido aquí, evaluando las
+tres formas concretas de resolverlo:
+
+- **(a) Solo `[tool_defaults]`, con alcance a todas las integraciones del run.**
+  Resuelve el caso común —"excluir `node_modules/` de todo"— con una sola
+  declaración. No resuelve el caso específico: si una herramienta necesita un
+  `timeout` distinto, no hay dónde decirlo sin que afecte a las demás.
+- **(b) Solo `[tools.<nombre>]`, con las cuatro claves de nivel 1 reconocidas ahí y
+  el resto como passthrough.** Es lo que esta revisión tenía antes de este cambio.
+  Resuelve el caso específico de forma directa, pero obliga a repetir el caso común
+  en cada bloque `[tools.<nombre>]` configurado.
+- **(c) Ambas, con `[tools.<nombre>]` ganando campo por campo sobre
+  `[tool_defaults]`.** Cubre los dos casos sin que ninguno pague el costo del otro.
+
+**Elegido: (c).** El argumento decisivo no es solo que cubre más casos — es que el
+caso común de (a) es real *hoy*, no solo en un futuro con Trivy integrado. El límite
+de "una categoría por invocación de CLI" (§8, "Una categoría por invocación en v0.1")
+no implica "una herramienta por documento de política": el mismo
+`.devsecops/config.toml` de un repositorio se reutiliza entre invocaciones distintas
+de `scan secrets` y, más adelante, `scan sca` contra ese mismo repositorio — es un
+documento por repositorio, no por invocación. Sin `[tool_defaults]`, excluir
+`node_modules/` para cualquier herramienta que llegue a correr contra ese
+repositorio exigiría repetir la misma lista en cada `[tools.<nombre>]` que se
+configure, y mantenerlas sincronizadas a mano cada vez que una cambie — exactamente
+el tipo de duplicación que el resto de este documento evita en cualquier otro punto
+de configuración compartida.
+
+El costo de (c) frente a (b) —una regla de precedencia más que explicar— se paga con
+un mecanismo que este documento ya tiene que justificar en otro punto, no con uno
+nuevo: **`[tools.<nombre>]` gana sobre `[tool_defaults]`, campo por campo, nunca el
+bloque entero** — la misma regla "una capa que no menciona un campo nunca oculta el
+valor de una capa inferior" que §8.4 ya usa para `continue_on_tool_error` y
+`strict_normalization` entre CLI, variable de entorno y archivo — aplicada aquí con
+dos capas (`[tool_defaults]` y `[tools.<nombre>]`) en vez de cuatro, porque ambas son
+exclusivamente de archivo (mismo motivo de §8.4). `linceo.core.tool_config
+.resolve_tool_config` implementa esta mezcla: para cada uno de los cuatro campos,
+gana el valor de `[tools.<nombre>]` si lo declaró, si no el de `[tool_defaults]`, si
+tampoco el default neutro de la propia integración. Un `[tools.<nombre>]` que solo
+fija `timeout` sigue heredando `exclude_paths` de `[tool_defaults]` sin más — nunca
+hace falta repetir lo que no se está cambiando.
+
+**`[tool_defaults]` nunca acepta passthrough.** A diferencia de nivel 1, un nombre de
+flag crudo no tiene significado compartido entre herramientas por definición — no
+existe un "valor por defecto razonable" de `redact` que tenga sentido fuera de
+Gitleaks. `parse_tool_defaults` rechaza cualquier clave de `[tool_defaults]` que no
+sea una de las cuatro de nivel 1, con un mensaje que señala que el passthrough vive
+en `[tools.<nombre>]`, nunca ahí.
 
 #### Nivel 1 — parámetros normalizados
 
 Cuatro campos, con el mismo nombre y el mismo significado para cualquier
-integración, declarados en `core/` (`linceo.core.tool_config.ToolConfig`):
+integración, declarados en `core/` (`linceo.core.tool_config.ToolConfig`), y
+reconocidos en las dos ubicaciones descritas arriba — nunca en la raíz del
+documento, donde no existe ninguno de los dos como sección propia:
 
 | Campo | Significado |
 |---|---|
@@ -1493,31 +1549,89 @@ configuración resuelta, sin ejecutarla.
 §8.4 ya exige que un documento de política inválido falle con código 2 **antes** de
 invocar ninguna herramienta. `UnsupportedToolConfigError` es la misma clase de fallo
 — una petición del operador que no puede honrarse — así que se sujeta al mismo
-principio: `engine.run` construye el argv de **toda** integración no omitida por
-política, para **todas** las herramientas del run, antes de ejecutar ninguna. Con dos
-herramientas en un mismo run (la invariante de §1: N ejecuciones, un veredicto), que
-la segunda rechace su configuración nunca deja a la primera ya ejecutada de verdad —
-la ejecución real solo empieza una vez que cada `build_command` de este run ya tuvo
-su oportunidad de fallar.
+principio: `engine.run` calcula, para cada integración no omitida por política, su
+`ToolConfig` ya mezclado (`resolve_tool_config(defaults=..., override=...)`, arriba)
+y construye su argv con él — para **todas** las herramientas del run, antes de
+ejecutar ninguna. Con dos herramientas en un mismo run (la invariante de §1: N
+ejecuciones, un veredicto), que la segunda rechace su configuración nunca deja a la
+primera ya ejecutada de verdad — la ejecución real solo empieza una vez que cada
+`build_command` de este run ya tuvo su oportunidad de fallar.
+
+Un peldaño antes que eso, `[tool_defaults]` y cada `[tools.<nombre>]` ya se validaron
+por completo al cargar la configuración (`load_config`, §8.4): un campo de nivel 1
+con el tipo equivocado, o un `[tool_defaults]` con una clave de passthrough, es
+`ConfigurationError` (código 2) antes de que exista siquiera un `ToolIntegration`
+construido — `UnsupportedToolConfigError` es estrictamente posterior, porque
+solo una integración concreta sabe si puede honrar un valor por lo demás
+sintácticamente válido.
+
+#### Mensaje de error específico cuando un campo de nivel 1 queda en el lugar equivocado
+
+Antes de que existieran `[tool_defaults]` y `[tools.<nombre>]` como las dos
+ubicaciones válidas, un documento con `exclude_paths` en la raíz —el error más
+esperable, alguien migrando configuración de otra herramienta o simplemente
+asumiendo que el campo es global— caía en el mensaje genérico de campo
+desconocido: cierto, pero mudo sobre dónde sí va. `_validate_top_level_keys`
+(`linceo.core.config`) distingue este caso: si alguna de las claves rechazadas
+coincide con `LEVEL_1_FIELD_NAMES` (el mismo conjunto de cuatro nombres que
+`linceo.core.tool_config` ya expone, no una lista repetida a mano y expuesta a
+desincronizarse), el mensaje señala explícitamente las dos secciones válidas:
+
+```
+configuration file '.../config.toml' declares unknown field(s): ['exclude_paths']
+— ['exclude_paths'] look like per-tool configuration (ADR §8.5): declare them
+inside [tool_defaults] (applies to every configured tool) or [tools.<name>]
+(applies to just that one tool), never at the document root
+```
+
+Un campo desconocido que no coincide con ninguno de los cuatro —un typo genuino,
+por ejemplo— conserva el mensaje genérico sin este añadido: la pista solo aparece
+cuando de verdad apunta a algo accionable.
 
 #### Esquema
 
-```toml
-[tools.gitleaks]
-scan_history = false             # solo árbol de trabajo — nunca --no-git por defecto (§10)
-custom_rules_path = ".gitleaks-custom.toml"   # --config
-# exclude_paths = ["vendor/"]    # rechazado: UnsupportedToolConfigError — Gitleaks no tiene flag
+Documento sintético completo (R5), con los dos niveles y las dos ubicaciones de
+nivel 1 en juego a la vez:
 
-# Nivel 2: passthrough — cualquier clave que no sea una de las cuatro de arriba.
-# Rompe portabilidad entre escáneres de secretos (§8) — documentado, no oculto.
+```toml
+version = 1
+
+[tool_defaults]                  # nivel 1, alcance: toda integración de este run
+exclude_paths = ["node_modules/", ".venv/", "dist/"]
+scan_history = true              # explícito aquí; el default de Gitleaks ya es este
+
+[tools.gitleaks]                 # nivel 1 específico + nivel 2 (passthrough), solo Gitleaks
+custom_rules_path = ".gitleaks-custom.toml"   # --config
+timeout = 45                     # gana sobre cualquier timeout de [tool_defaults]
+# exclude_paths = ["vendor/"]    # si se pusiera aquí, ganaría sobre el de [tool_defaults]
+                                  # para Gitleaks — pero Gitleaks lo rechazaría igual:
+                                  # UnsupportedToolConfigError, no tiene flag (ver arriba)
+
+# Nivel 2: passthrough — cualquier clave de [tools.gitleaks] que no sea una de las
+# cuatro de nivel 1. Rompe portabilidad entre escáneres de secretos (§8) — documentado,
+# no oculto.
 redact = 25
 no-color = true
+
+# Rechazado con el mensaje específico de arriba, nunca "campo desconocido" a secas:
+# exclude_paths = ["build/"]     # pertenece a [tool_defaults] o [tools.<nombre>], no a la raíz
 ```
 
-`Config.tool_configs` es un `Mapping[str, ToolConfig]` indexado por
-`ToolIntegration.name`, igual que `skip_by_tool` en `engine.run` ya indexa
-`ToolSkip` por nombre de herramienta — una herramienta sin bloque `[tools.<nombre>]`
-recibe `ToolConfig()`, sus propios defaults neutros, nunca un error por ausencia.
+Con este documento, la integración `gitleaks` recibe, ya mezclado por
+`resolve_tool_config`: `exclude_paths=("node_modules/", ".venv/", "dist/")` (heredado
+de `[tool_defaults]`, `[tools.gitleaks]` no lo menciona), `scan_history=True`,
+`custom_rules_path=".gitleaks-custom.toml"` y `timeout=45.0` (los tres últimos, de
+`[tools.gitleaks]`), más el passthrough `{"redact": 25, "no-color": True}` — y
+`build_command` la rechaza de todos modos por `exclude_paths`, exactamente como sin
+`[tool_defaults]` en absoluto: heredar un valor no vuelve honrable lo que la
+integración ya no puede honrar declarado directamente.
+
+`Config.tool_defaults` es un único `ToolConfig` (nunca indexado por nombre —
+`[tool_defaults]` no lo está en el documento tampoco); `Config.tool_configs` es un
+`Mapping[str, ToolConfig]` indexado por `ToolIntegration.name`, igual que
+`skip_by_tool` en `engine.run` ya indexa `ToolSkip` por nombre de herramienta — una
+herramienta sin bloque `[tools.<nombre>]` propio sigue recibiendo `[tool_defaults]`
+íntegro vía `resolve_tool_config`, nunca un error por ausencia de su propio bloque.
 
 ---
 

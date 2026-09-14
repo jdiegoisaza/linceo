@@ -54,11 +54,14 @@ from linceo.core.reporters import render_console, render_json
 from linceo.core.results import RunResult, RunStatus, ThresholdBreach, Verdict
 from linceo.core.severity import SEVERITY_ORDER, Severity, SeveritySource
 from linceo.core.tool_config import (
+    LEVEL_1_FIELD_NAMES,
     PassthroughValue,
     ToolConfig,
     UnsupportedToolConfigError,
     parse_tool_configs,
+    parse_tool_defaults,
     render_passthrough_flags,
+    resolve_tool_config,
 )
 
 __all__ = [
@@ -67,6 +70,7 @@ __all__ = [
     "EXIT_GATE_FAILED",
     "EXIT_OK",
     "EXIT_TOOL_EXECUTION_FAILED",
+    "LEVEL_1_FIELD_NAMES",
     "SEVERITY_ORDER",
     "TOOL_INTEGRATION_ENTRY_POINT_GROUP",
     "Category",
@@ -117,9 +121,11 @@ __all__ = [
     "load_config",
     "normalize_finding",
     "parse_tool_configs",
+    "parse_tool_defaults",
     "render_console",
     "render_json",
     "render_passthrough_flags",
+    "resolve_tool_config",
     "run",
     "thresholds_from_fail_on",
 ]

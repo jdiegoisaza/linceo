@@ -52,7 +52,12 @@ from linceo.core.policy import (
     parse_policy_document,
 )
 from linceo.core.severity import Severity
-from linceo.core.tool_config import ToolConfig, parse_tool_configs
+from linceo.core.tool_config import (
+    LEVEL_1_FIELD_NAMES,
+    ToolConfig,
+    parse_tool_configs,
+    parse_tool_defaults,
+)
 
 #: Conventional config file location inside the scanned workspace,
 #: resolved only when no explicit `--config` path is given (ADR §5/R5).
@@ -93,6 +98,7 @@ _FILE_TOP_LEVEL_KNOWN_KEYS = frozenset(
         "thresholds",
         "exclusions",
         "skipped_tools",
+        "tool_defaults",
         "tools",
     }
 )
@@ -128,12 +134,18 @@ class Config:
     `--fail-on` cutoff or a policy file's `[thresholds]` table (ADR §8.1).
     `policy` carries this run's exclusions and temporary tool skips (ADR
     §8.2) — the same file, the same precedence chain, but file-only for
-    now, with no CLI or environment-variable equivalent. `tool_configs`
-    carries every `[tools.<name>]` table, keyed by tool name (ADR §8.5) —
-    file-only in exactly the same sense and for the same reason: none of
-    its shapes (a list of patterns, a local path, an arbitrary per-tool
-    table) fit a scalar CLI flag or environment variable any better than
-    exclusions and tool skips already didn't.
+    now, with no CLI or environment-variable equivalent. `tool_defaults`
+    and `tool_configs` are the two places level 1 per-integration
+    configuration can come from (ADR §8.5): `tool_defaults` is the single
+    `[tool_defaults]` table, applied to every integration in the run;
+    `tool_configs` carries every `[tools.<name>]` table, keyed by tool
+    name — level 1 fields it sets itself, plus level 2 passthrough.
+    `linceo.core.tool_config.resolve_tool_config` merges the two for one
+    named tool, `tool_configs`'s own value winning field by field. Both
+    are file-only in exactly the same sense, and for the same reason, as
+    `policy`: none of their shapes (a list of patterns, a local path, an
+    arbitrary per-tool table) fit a scalar CLI flag or environment
+    variable any better than exclusions and tool skips already didn't.
 
     Every field defaults to the permissive, reporting-only choice the ADR
     documents: no gate configured (§8.1), `continue_on_tool_error = False`
@@ -150,6 +162,7 @@ class Config:
     max_expiry_horizon_days: int = DEFAULT_MAX_HORIZON_DAYS
     report_max_rows: int = DEFAULT_REPORT_MAX_ROWS
     policy: Policy = field(default_factory=Policy)
+    tool_defaults: ToolConfig = field(default_factory=ToolConfig)
     tool_configs: Mapping[str, ToolConfig] = field(default_factory=dict)
 
 
@@ -302,14 +315,31 @@ def _validate_version(raw_document: Mapping[str, object], *, path: str) -> None:
 def _validate_top_level_keys(raw_document: Mapping[str, object], *, path: str) -> None:
     """Reject a policy document with a key this schema does not know about.
 
+    A key that is actually one of `LEVEL_1_FIELD_NAMES` (ADR §8.5) gets a
+    specific hint pointing at `[tool_defaults]`/`[tools.<name>]` instead of
+    the generic "unknown field" message: `exclude_paths` at the document
+    root is a real, easy mistake — level 1's four field names are not
+    valid top-level keys on their own, only inside one of those two
+    sections — and "unknown field" alone, true as it is, does not say
+    where the field actually belongs.
+
     Raises:
         ConfigurationError: if `raw_document` declares a top-level key
             outside `_FILE_TOP_LEVEL_KNOWN_KEYS`.
     """
     unknown = set(raw_document) - _FILE_TOP_LEVEL_KNOWN_KEYS
-    if unknown:
-        msg = f"configuration file {path!r} declares unknown field(s): {sorted(unknown)}"
-        raise ConfigurationError(msg)
+    if not unknown:
+        return
+
+    msg = f"configuration file {path!r} declares unknown field(s): {sorted(unknown)}"
+    misplaced_level1 = sorted(unknown & LEVEL_1_FIELD_NAMES)
+    if misplaced_level1:
+        msg += (
+            f" — {misplaced_level1} look like per-tool configuration (ADR §8.5): declare "
+            "them inside [tool_defaults] (applies to every configured tool) or "
+            "[tools.<name>] (applies to just that one tool), never at the document root"
+        )
+    raise ConfigurationError(msg)
 
 
 def _extract_report_max_rows(raw_document: Mapping[str, object], *, path: str) -> object | None:
@@ -490,6 +520,7 @@ def load_config(
             today=today,
             max_horizon_days=max_expiry_horizon_days,
         )
+        tool_defaults = parse_tool_defaults(raw_document)
         tool_configs = parse_tool_configs(raw_document)
     except PolicyConfigurationError as exc:
         raise ConfigurationError(str(exc)) from exc
@@ -508,5 +539,6 @@ def load_config(
         max_expiry_horizon_days=max_expiry_horizon_days,
         report_max_rows=report_max_rows,
         policy=Policy(exclusions=policy_document.exclusions, tool_skips=policy_document.tool_skips),
+        tool_defaults=tool_defaults,
         tool_configs=tool_configs,
     )

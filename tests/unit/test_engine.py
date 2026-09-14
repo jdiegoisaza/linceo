@@ -379,6 +379,36 @@ def test_tool_config_timeout_is_threaded_through_to_the_executor() -> None:
     assert timeout == 42.0
 
 
+def test_tool_defaults_apply_when_no_per_tool_override_sets_the_field() -> None:
+    gitleaks = StaticToolIntegration(
+        name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+    config = Config(tool_defaults=ToolConfig(timeout=60.0))
+
+    _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=config)
+
+    [(_argv, _env, _cwd, timeout)] = executor.calls
+    assert timeout == 60.0
+
+
+def test_per_tool_override_wins_over_tool_defaults_for_the_same_field() -> None:
+    """The motivating case, end to end: a shared default, overridden by one tool's own block."""
+    gitleaks = StaticToolIntegration(
+        name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+    config = Config(
+        tool_defaults=ToolConfig(timeout=60.0),
+        tool_configs={"gitleaks": ToolConfig(timeout=10.0)},
+    )
+
+    _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=config)
+
+    [(_argv, _env, _cwd, timeout)] = executor.calls
+    assert timeout == 10.0
+
+
 def test_an_unconfigured_tool_gets_the_all_default_tool_config() -> None:
     """No `[tools.<name>]` entry at all means `ToolConfig()`'s own defaults — `timeout=None`."""
     gitleaks = StaticToolIntegration(

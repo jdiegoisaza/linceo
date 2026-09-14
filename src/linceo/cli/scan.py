@@ -23,7 +23,7 @@ from linceo.core.findings import Category
 from linceo.core.normalization import SeverityNormalizer
 from linceo.core.policy import PolicyConfigurationError
 from linceo.core.reporters import render_console, render_json
-from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError
+from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError, resolve_tool_config
 from linceo.providers.environment import process_environment
 from linceo.providers.local import ContextResolutionError, LocalContextProvider
 
@@ -137,7 +137,10 @@ def scan_secrets(
         gitleaks_version = "unknown"
 
     integration = GitleaksIntegration(version=gitleaks_version)
-    tool_config = resolved_config.tool_configs.get(integration.name, ToolConfig())
+    tool_config = resolve_tool_config(
+        defaults=resolved_config.tool_defaults,
+        override=resolved_config.tool_configs.get(integration.name, ToolConfig()),
+    )
 
     if dry_run:
         try:

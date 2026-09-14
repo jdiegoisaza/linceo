@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from linceo.core.policy import PolicyConfigurationError
-from linceo.core.tool_config import ToolConfig, parse_tool_configs, render_passthrough_flags
+from linceo.core.tool_config import (
+    ToolConfig,
+    parse_tool_configs,
+    parse_tool_defaults,
+    render_passthrough_flags,
+    resolve_tool_config,
+)
 
 # --- render_passthrough_flags -------------------------------------------------
 
@@ -182,3 +188,92 @@ def test_a_passthrough_value_outside_the_allowed_shapes_is_a_policy_configuratio
 ) -> None:
     with pytest.raises(PolicyConfigurationError, match="must be a string, number, boolean"):
         parse_tool_configs({"tools": {"gitleaks": {"weird": value}}})
+
+
+# --- parse_tool_defaults -------------------------------------------------------
+
+
+def test_no_tool_defaults_table_returns_the_all_default_tool_config() -> None:
+    assert parse_tool_defaults({}) == ToolConfig()
+
+
+def test_tool_defaults_not_a_table_is_a_policy_configuration_error() -> None:
+    with pytest.raises(PolicyConfigurationError, match="tool_defaults must be a table"):
+        parse_tool_defaults({"tool_defaults": "oops"})
+
+
+def test_tool_defaults_parses_the_same_level_1_fields_as_a_per_tool_block() -> None:
+    defaults = parse_tool_defaults(
+        {
+            "tool_defaults": {
+                "exclude_paths": ["node_modules/", ".venv/"],
+                "scan_history": True,
+                "custom_rules_path": "/etc/linceo/shared-rules.toml",
+                "timeout": 90,
+            }
+        }
+    )
+
+    assert defaults == ToolConfig(
+        exclude_paths=("node_modules/", ".venv/"),
+        scan_history=True,
+        custom_rules_path="/etc/linceo/shared-rules.toml",
+        timeout=90.0,
+    )
+
+
+def test_tool_defaults_rejects_a_field_that_is_not_one_of_the_four_level_1_fields() -> None:
+    """`[tool_defaults]` never carries passthrough — a raw flag name has no meaning shared
+
+    across tools (ADR §8.5), so even a syntactically valid passthrough-shaped value here is
+    still rejected, with a hint pointing at `[tools.<name>]` instead.
+    """
+    with pytest.raises(PolicyConfigurationError, match=r"\[tools\.<name>\] instead"):
+        parse_tool_defaults({"tool_defaults": {"redact": 50}})
+
+
+def test_tool_defaults_reuses_level_1_field_validation() -> None:
+    with pytest.raises(PolicyConfigurationError, match=r"tool_defaults\.timeout must be positive"):
+        parse_tool_defaults({"tool_defaults": {"timeout": -1}})
+
+
+# --- resolve_tool_config --------------------------------------------------------
+
+
+def test_resolve_falls_back_to_defaults_field_by_field_when_override_sets_nothing() -> None:
+    defaults = ToolConfig(exclude_paths=("node_modules/",), scan_history=True, timeout=60.0)
+
+    resolved = resolve_tool_config(defaults=defaults, override=ToolConfig())
+
+    assert resolved == defaults
+
+
+def test_resolve_lets_override_win_field_by_field_without_losing_the_rest_of_defaults() -> None:
+    """The motivating case: a shared exclude_paths default, one tool overriding only timeout."""
+    defaults = ToolConfig(exclude_paths=("node_modules/",), scan_history=True, timeout=60.0)
+    override = ToolConfig(timeout=10.0)
+
+    resolved = resolve_tool_config(defaults=defaults, override=override)
+
+    assert resolved.exclude_paths == ("node_modules/",)  # inherited from defaults
+    assert resolved.scan_history is True  # inherited from defaults
+    assert resolved.timeout == 10.0  # overridden
+
+
+def test_resolve_lets_an_explicit_empty_exclude_paths_override_a_non_empty_default() -> None:
+    """`None` (never mentioned) and `()` (explicitly empty) are distinct at this layer."""
+    defaults = ToolConfig(exclude_paths=("node_modules/",))
+    override = ToolConfig(exclude_paths=())
+
+    resolved = resolve_tool_config(defaults=defaults, override=override)
+
+    assert resolved.exclude_paths == ()
+
+
+def test_resolve_never_merges_passthrough_it_is_always_the_overrides() -> None:
+    defaults = ToolConfig()  # tool_defaults never carries passthrough in practice
+    override = ToolConfig(passthrough={"redact": 50})
+
+    resolved = resolve_tool_config(defaults=defaults, override=override)
+
+    assert resolved.passthrough == {"redact": 50}

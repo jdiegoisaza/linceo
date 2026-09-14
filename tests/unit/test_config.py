@@ -604,3 +604,67 @@ def test_an_invalid_tool_config_field_is_a_configuration_error_at_load_time(
             package_root=str(tmp_path / "package"),
             today=TODAY,
         )
+
+
+def test_tool_defaults_loads_through_the_config_file(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        '[tool_defaults]\nexclude_paths = ["node_modules/", ".venv/"]\nscan_history = true\n'
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    assert config.tool_defaults == ToolConfig(
+        exclude_paths=("node_modules/", ".venv/"), scan_history=True
+    )
+
+
+def test_no_tool_defaults_table_means_the_all_default_tool_config(tmp_path: Path) -> None:
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    assert config.tool_defaults == ToolConfig()
+
+
+def test_a_level_1_field_at_the_document_root_is_a_configuration_error_with_a_specific_hint(
+    tmp_path: Path,
+) -> None:
+    """ "unknown field" alone doesn't say *where* exclude_paths actually belongs (ADR §8.5)."""
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('exclude_paths = ["node_modules/"]\n')
+
+    with pytest.raises(ConfigurationError, match=r"\[tool_defaults\].*\[tools\.<name>\]"):
+        load_config(
+            explicit_config_path=None,
+            workspace_path=str(tmp_path),
+            package_root=str(tmp_path / "package"),
+            today=TODAY,
+        )
+
+
+def test_an_unrelated_unknown_root_field_gets_no_level_1_hint(tmp_path: Path) -> None:
+    """The hint only fires for an actual level 1 field name — not for every typo."""
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('typo_field = "oops"\n')
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        load_config(
+            explicit_config_path=None,
+            workspace_path=str(tmp_path),
+            package_root=str(tmp_path / "package"),
+            today=TODAY,
+        )
+
+    assert "tool_defaults" not in str(exc_info.value)

@@ -393,6 +393,50 @@ def test_dry_run_reflects_a_scan_history_false_tool_config(
     assert "--no-git" in result.output
 
 
+def test_dry_run_reflects_tool_defaults_merged_with_a_per_tool_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`[tool_defaults]` applies even without gitleaks' own block declaring the field, and
+
+    `[tools.gitleaks]` overrides it field by field for the one it does declare (ADR §8.5)."""
+    repo = _init_repo(tmp_path / "widgets")
+    monkeypatch.setattr("linceo.cli.scan.SubprocessToolExecutor", _stub_executor_factory({}))
+    config_path = tmp_path / "policy.toml"
+    config_path.write_text(
+        "[tool_defaults]\n"
+        "scan_history = false\n"
+        "\n"
+        "[tools.gitleaks]\n"
+        'custom_rules_path = ".gitleaks-custom.toml"\n'
+    )
+
+    result = runner.invoke(
+        app, ["scan", "secrets", "--path", str(repo), "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0
+    assert "--no-git" in result.output  # inherited from [tool_defaults]
+    assert "--config .gitleaks-custom.toml" in result.output  # from [tools.gitleaks]
+
+
+def test_dry_run_shows_the_per_tool_override_winning_over_tool_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    monkeypatch.setattr("linceo.cli.scan.SubprocessToolExecutor", _stub_executor_factory({}))
+    config_path = tmp_path / "policy.toml"
+    config_path.write_text(
+        "[tool_defaults]\nscan_history = false\n\n[tools.gitleaks]\nscan_history = true\n"
+    )
+
+    result = runner.invoke(
+        app, ["scan", "secrets", "--path", str(repo), "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0
+    assert "--no-git" not in result.output
+
+
 def test_dry_run_reflects_passthrough_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

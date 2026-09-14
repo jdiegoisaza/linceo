@@ -24,7 +24,7 @@ from linceo.core.normalization import SeverityNormalizer, normalize_finding
 from linceo.core.policy import ToolSkip, apply_exclusions, split_tool_skips
 from linceo.core.ports import ContextProvider, ToolExecutor, ToolIntegration
 from linceo.core.results import RunResult, RunStatus
-from linceo.core.tool_config import ToolConfig
+from linceo.core.tool_config import ToolConfig, resolve_tool_config
 
 
 def _execute_one(
@@ -192,7 +192,10 @@ def run(
     skip_by_tool = {skip.tool: skip for skip in active_skips}
 
     tool_configs_by_tool = {
-        integration.name: config.tool_configs.get(integration.name, ToolConfig())
+        integration.name: resolve_tool_config(
+            defaults=config.tool_defaults,
+            override=config.tool_configs.get(integration.name, ToolConfig()),
+        )
         for integration in integrations.values()
     }
     argv_by_category: dict[Category, tuple[str, ...]] = {
