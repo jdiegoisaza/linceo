@@ -1,0 +1,22 @@
+title = "linceo gitleaks configuration"
+
+# Extends gitleaks' own default ruleset rather than replacing it — this
+# project's dogfooding hook (AGENTS.md, ADR §4/R5) is meant to catch a real
+# secret landing anywhere in the repository, not a narrower custom ruleset.
+[extend]
+useDefault = true
+
+# `tests/` deliberately contains synthetic, gitleaks-rule-shaped values: the
+# golden fixtures under `tests/unit/fixtures/gitleaks/` are literal captured
+# output from real gitleaks runs against disposable repositories (see that
+# directory's README.md), and a handful of test modules inline the same
+# synthetic values to construct the fingerprints those fixtures should
+# produce. None of these are real credentials — allowlisting the whole test
+# tree is simpler to keep correct over time than chasing every new synthetic
+# value with its own regex, and "a real secret would only ever land in
+# `tests/`" is not a risk this project accepts anywhere else.
+[allowlist]
+description = "Synthetic secrets in test fixtures and test code (ADR §11) — not real credentials"
+paths = [
+  '''^tests/.*''',
+]

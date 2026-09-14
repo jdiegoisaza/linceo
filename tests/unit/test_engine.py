@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from linceo.core.baseline import Baseline
 from linceo.core.config import Config, ConfigurationError, load_config
 from linceo.core.context import ExecutionContext, Platform
 from linceo.core.engine import run
@@ -22,8 +21,11 @@ from linceo.core.exit_codes import (
     compute_exit_code,
 )
 from linceo.core.findings import Category, Location, Package, RawFinding
+from linceo.core.fingerprint import secret_fingerprint
 from linceo.core.normalization import SeverityNormalizer
+from linceo.core.policy import ConfigLayer, Exclusion, Policy, ThresholdResolution, ToolSkip
 from linceo.core.ports import ProcessResult
+from linceo.core.report_schema import Column, ReportSchema
 from linceo.core.results import RunResult, RunStatus
 from linceo.core.severity import Severity
 from linceo.testing import FakeContextProvider, FakeToolExecutor
@@ -37,6 +39,7 @@ _CONTEXT = ExecutionContext(
     commit="abc123",
 )
 _SECRET_HASH = "deadbeef"  # noqa: S105 -- test fixture value, not a credential
+_SCHEMA = ReportSchema(location=Column(header="LOCATION", fields=("location.path",)))
 
 
 def _process_result(*, exit_code: int = 0) -> ProcessResult:
@@ -68,6 +71,9 @@ class StaticToolIntegration:
     def native_severity_domain(self) -> frozenset[str]:
         return frozenset()
 
+    def report_schema(self) -> ReportSchema:
+        return _SCHEMA
+
 
 def _secret_raw_finding(severity_raw: str | None = None) -> RawFinding:
     return RawFinding(
@@ -93,6 +99,11 @@ def _sca_raw_finding() -> RawFinding:
     )
 
 
+def _config_with_fail_on(fail_on: Severity | None, **kwargs: object) -> Config:
+    resolution = ThresholdResolution.for_fail_on(fail_on, source=ConfigLayer.CLI)
+    return Config(threshold_resolution=resolution, **kwargs)  # type: ignore[arg-type]
+
+
 def _run(
     *,
     integrations: dict[Category, StaticToolIntegration],
@@ -105,7 +116,6 @@ def _run(
         integrations=integrations,
         executor=executor,
         normalizer=SeverityNormalizer(native_map={("trivy", "HIGH"): Severity.HIGH}),
-        baseline=Baseline(),
         config=config,
         now=_NOW,
     )
@@ -120,7 +130,7 @@ def test_exit_code_0_when_the_run_completes_and_the_gate_passes() -> None:
     result = _run(
         integrations={Category.SECRETS: gitleaks},
         executor=executor,
-        config=Config(fail_on=Severity.HIGH),
+        config=_config_with_fail_on(Severity.HIGH),
     )
 
     assert result.status is RunStatus.COMPLETED
@@ -141,7 +151,7 @@ def test_exit_code_1_when_the_run_completes_and_the_gate_fails() -> None:
     result = _run(
         integrations={Category.SECRETS: gitleaks},
         executor=executor,
-        config=Config(fail_on=Severity.HIGH),
+        config=_config_with_fail_on(Severity.HIGH),
     )
 
     assert result.status is RunStatus.COMPLETED
@@ -156,6 +166,7 @@ def test_exit_code_2_when_configuration_is_invalid(tmp_path: Path) -> None:
             explicit_config_path=None,
             workspace_path=str(tmp_path),
             package_root=str(tmp_path),
+            today=date(2026, 9, 13),
         )
     assert EXIT_CONFIGURATION_ERROR == 2
 
@@ -166,11 +177,7 @@ def test_exit_code_3_when_a_tool_binary_is_missing_and_evidence_is_incomplete() 
     )
     executor = FakeToolExecutor(recordings={})  # no recording -> FileNotFoundError -> SKIPPED
 
-    result = _run(
-        integrations={Category.SECRETS: gitleaks},
-        executor=executor,
-        config=Config(),
-    )
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=Config())
 
     assert result.status is RunStatus.PARTIAL
     assert result.executions[0].status is ExecutionStatus.SKIPPED
@@ -184,11 +191,7 @@ def test_executor_crash_marks_the_execution_failed_not_skipped() -> None:
     )
     executor = FakeToolExecutor(recordings={"gitleaks": TimeoutError("scan timed out")})
 
-    result = _run(
-        integrations={Category.SECRETS: gitleaks},
-        executor=executor,
-        config=Config(),
-    )
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=Config())
 
     assert result.executions[0].status is ExecutionStatus.FAILED
     assert result.status is RunStatus.PARTIAL
@@ -209,11 +212,7 @@ def test_parse_output_failure_marks_the_execution_failed_with_no_findings() -> N
     )
     executor = FakeToolExecutor(recordings={"gitleaks": _process_result(exit_code=0)})
 
-    result = _run(
-        integrations={Category.SECRETS: gitleaks},
-        executor=executor,
-        config=Config(),
-    )
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=Config())
 
     execution = result.executions[0]
     assert execution.status is ExecutionStatus.FAILED
@@ -228,11 +227,7 @@ def test_continue_on_tool_error_overrides_the_partial_run_exit_code() -> None:
     )
     executor = FakeToolExecutor(recordings={})
 
-    result = _run(
-        integrations={Category.SECRETS: gitleaks},
-        executor=executor,
-        config=Config(),
-    )
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=Config())
 
     assert result.status is RunStatus.PARTIAL
     assert compute_exit_code(result, continue_on_tool_error=True) == EXIT_OK
@@ -263,7 +258,7 @@ def test_two_tool_executions_in_one_run_produce_a_single_aggregated_verdict() ->
     result = _run(
         integrations={Category.SECRETS: gitleaks, Category.SCA: trivy},
         executor=executor,
-        config=Config(fail_on=Severity.HIGH),
+        config=_config_with_fail_on(Severity.HIGH),
     )
 
     assert len(result.executions) == 2
@@ -278,3 +273,74 @@ def test_two_tool_executions_in_one_run_produce_a_single_aggregated_verdict() ->
     assert result.verdict.counts_by_severity[Severity.HIGH] == 2
     assert result.verdict.passed is False
     assert compute_exit_code(result, continue_on_tool_error=False) == EXIT_GATE_FAILED
+
+
+# --- exclusions and tool skips, wired end to end (ADR §8.2) -------------------
+
+
+def test_exclusion_suppresses_a_finding_and_it_does_not_count_for_the_gate() -> None:
+    gitleaks = StaticToolIntegration(
+        name="gitleaks",
+        version="8.18.0",
+        category=Category.SECRETS,
+        argv=("gitleaks", "detect"),
+        raw_findings=(_secret_raw_finding(),),
+    )
+    executor = FakeToolExecutor(recordings={"gitleaks": _process_result()})
+    fingerprint = secret_fingerprint(
+        rule_id="aws-access-key", path="src/config.py", secret_hash=_SECRET_HASH
+    )
+    exclusion = Exclusion(
+        fingerprint=fingerprint,
+        reason="Synthetic credential in the parser test corpus",
+        owner="team-atlas",
+        expires_at=_NOW.date() + timedelta(days=1),
+    )
+    config = _config_with_fail_on(Severity.HIGH, policy=Policy(exclusions=(exclusion,)))
+
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=config)
+
+    assert result.suppressed_findings != ()
+    assert result.verdict.passed is True
+
+
+def test_active_tool_skip_prevents_invocation_and_does_not_make_the_run_partial() -> None:
+    gitleaks = StaticToolIntegration(
+        name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
+    )
+    executor = FakeToolExecutor(recordings={})  # would raise FileNotFoundError if ever called
+    skip = ToolSkip(
+        tool="gitleaks",
+        reason="Rollout paused while the team triages the initial backlog",
+        owner="team-atlas",
+        expires_at=_NOW.date() + timedelta(days=1),
+    )
+    config = Config(policy=Policy(tool_skips=(skip,)))
+
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=config)
+
+    assert executor.calls == []
+    assert result.executions[0].status is ExecutionStatus.SKIPPED_BY_POLICY
+    assert result.status is RunStatus.COMPLETED
+    assert result.applied_tool_skips == (skip,)
+    assert compute_exit_code(result, continue_on_tool_error=False) == EXIT_OK
+
+
+def test_expired_tool_skip_lets_the_tool_run_again() -> None:
+    gitleaks = StaticToolIntegration(
+        name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
+    )
+    executor = FakeToolExecutor(recordings={"gitleaks": _process_result()})
+    skip = ToolSkip(
+        tool="gitleaks",
+        reason="Rollout paused while the team triages the initial backlog",
+        owner="team-atlas",
+        expires_at=_NOW.date() - timedelta(days=1),
+    )
+    config = Config(policy=Policy(tool_skips=(skip,)))
+
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=config)
+
+    assert result.executions[0].status is ExecutionStatus.COMPLETED
+    assert result.applied_tool_skips == ()
+    assert result.expired_tool_skips == (skip,)

@@ -1,4 +1,4 @@
-"""The orchestration engine: context -> execution -> normalization -> dedup -> baseline -> gate.
+"""The orchestration engine: context -> execution -> normalization -> dedup -> policy -> gate.
 
 `run()` is the single place these stages are wired together, over the
 three ports from ADR §1 — `ContextProvider`, `ToolExecutor`,
@@ -13,15 +13,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
 
-from linceo.core.baseline import Baseline, apply_baseline
 from linceo.core.config import Config
 from linceo.core.dedup import deduplicate
 from linceo.core.execution import DataSource, ExecutionStatus, ToolExecution
 from linceo.core.findings import Category, Finding
 from linceo.core.gate import evaluate_gate
 from linceo.core.normalization import SeverityNormalizer, normalize_finding
+from linceo.core.policy import ToolSkip, apply_exclusions, split_tool_skips
 from linceo.core.ports import ContextProvider, ToolExecutor, ToolIntegration
 from linceo.core.results import RunResult, RunStatus
 
@@ -33,8 +33,14 @@ def _execute_one(
     executor: ToolExecutor,
     workspace_path: str,
     normalizer: SeverityNormalizer,
+    skip: ToolSkip | None,
 ) -> ToolExecution:
     """Run and normalize one `ToolIntegration`'s execution, absorbing its failures.
+
+    When `skip` is not `None`, the tool is never invoked at all — the
+    execution is `SKIPPED_BY_POLICY` (ADR §5, §8), a declared and caducable
+    absence, distinct from `SKIPPED` (a missing binary) and `FAILED` (a
+    crash), neither of which is sanctioned.
 
     A missing binary (`FileNotFoundError`) becomes `ExecutionStatus.SKIPPED`
     — the tool was never invoked at all (ADR R4: a missing tool is an
@@ -42,6 +48,20 @@ def _execute_one(
     parse, or normalize becomes `ExecutionStatus.FAILED` — both are
     *absence of evidence*, not "zero findings" (ADR §5).
     """
+    if skip is not None:
+        return ToolExecution(
+            tool=integration.name,
+            tool_version=integration.version,
+            category=category,
+            argv=(),
+            started_at=None,
+            finished_at=None,
+            exit_code=None,
+            status=ExecutionStatus.SKIPPED_BY_POLICY,
+            findings=(),
+            data_sources=(),
+        )
+
     argv = tuple(integration.build_command(workspace_path=workspace_path))
 
     try:
@@ -105,6 +125,16 @@ def _execute_one(
     )
 
 
+def _incomplete(status: ExecutionStatus) -> bool:
+    """Whether `status` means a `ToolExecution` did not produce usable evidence (ADR §5).
+
+    `SKIPPED_BY_POLICY` is deliberately excluded: it is a declared,
+    caducable absence, not the accidental one `RunStatus.PARTIAL` exists to
+    flag.
+    """
+    return status not in (ExecutionStatus.COMPLETED, ExecutionStatus.SKIPPED_BY_POLICY)
+
+
 def run(
     *,
     run_id: str,
@@ -112,7 +142,6 @@ def run(
     integrations: Mapping[Category, ToolIntegration],
     executor: ToolExecutor,
     normalizer: SeverityNormalizer,
-    baseline: Baseline,
     config: Config,
     now: datetime,
 ) -> RunResult:
@@ -120,15 +149,21 @@ def run(
 
     `now` is supplied by the caller rather than read from the system clock
     here (ADR R3's determinism corollary: no core module calls
-    `datetime.now()` directly) — it is used only as the baseline's
-    "today" for expiry comparisons.
+    `datetime.now()` directly) — its date is used both as the exclusion
+    policy's "today" for expiry comparisons and to decide which of
+    `config.policy.tool_skips` are still active.
 
-    Every `ToolIntegration` in `integrations` runs, regardless of whether
-    an earlier one failed — a run's evidence is only known to be
-    incomplete once every execution has been attempted.
+    Every `ToolIntegration` in `integrations` is either skipped by an
+    active `ToolSkip` or run, regardless of whether an earlier one failed —
+    a run's evidence is only known to be incomplete once every execution
+    has been attempted or sanctioned-skipped.
     """
     context = context_provider.resolve()
     effective_normalizer = replace(normalizer, strict=config.strict_normalization)
+    today: date = now.date()
+
+    active_skips, expired_skips = split_tool_skips(config.policy.tool_skips, today=today)
+    skip_by_tool = {skip.tool: skip for skip in active_skips}
 
     executions = tuple(
         _execute_one(
@@ -137,8 +172,14 @@ def run(
             executor=executor,
             workspace_path=context.workspace_path,
             normalizer=effective_normalizer,
+            skip=skip_by_tool.get(integration.name),
         )
         for category, integration in integrations.items()
+    )
+    applied_tool_skips = tuple(
+        skip_by_tool[execution.tool]
+        for execution in executions
+        if execution.status is ExecutionStatus.SKIPPED_BY_POLICY
     )
 
     all_findings: tuple[Finding, ...] = tuple(
@@ -146,17 +187,14 @@ def run(
     )
     deduplicated = deduplicate(all_findings)
 
-    baseline_outcome = apply_baseline(
-        deduplicated,
-        baseline,
-        today=now.date(),
-        max_horizon_days=config.baseline_max_horizon_days,
+    exclusion_outcome = apply_exclusions(
+        deduplicated, config.policy.exclusions, today=today, repository=context.repository
     )
-    verdict = evaluate_gate(baseline_outcome.active, fail_on=config.fail_on)
+    verdict = evaluate_gate(exclusion_outcome.active, resolution=config.threshold_resolution)
 
     status = (
         RunStatus.PARTIAL
-        if any(execution.status is not ExecutionStatus.COMPLETED for execution in executions)
+        if any(_incomplete(execution.status) for execution in executions)
         else RunStatus.COMPLETED
     )
 
@@ -167,6 +205,8 @@ def run(
         findings=deduplicated,
         verdict=verdict,
         status=status,
-        suppressed_findings=baseline_outcome.suppressed,
-        expired_suppressions=baseline_outcome.expired,
+        suppressed_findings=exclusion_outcome.suppressed,
+        expired_exclusions=exclusion_outcome.expired,
+        applied_tool_skips=applied_tool_skips,
+        expired_tool_skips=expired_skips,
     )

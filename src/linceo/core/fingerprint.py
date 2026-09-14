@@ -15,6 +15,7 @@ herramienta no entra en la huella").
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 
 #: Current fingerprint algorithm version, embedded in every value this
 #: module produces. Bumping it is a breaking change requiring a migration
@@ -59,3 +60,44 @@ def sca_fingerprint(
         f"{FINGERPRINT_VERSION}:"
         f"{_digest(package_name, package_version, vulnerability_id, manifest_path)}"
     )
+
+
+def short_fingerprints(fingerprints: Iterable[str], *, min_length: int = 8) -> dict[str, str]:
+    """Compute a display-safe short form of each of ``fingerprints`` (ADR §7, "FP").
+
+    Every value must carry the ``FINGERPRINT_VERSION`` prefix this module
+    produces (``v1:<hex>``); the returned short form keeps that same
+    version prefix, so a value copied out of a console report is still
+    recognizably a versioned fingerprint that an exclusion's ``fingerprint``
+    field can match by prefix (ADR §8.2).
+
+    The hex portion is truncated to the shortest length, no less than
+    ``min_length``, that keeps every value in ``fingerprints`` distinct from
+    every other value *in this same call* — uniqueness is guaranteed only
+    for the exact set passed in here, never across separate runs, since a
+    future run's finding could plausibly share a short prefix with one from
+    today.
+
+    Raises:
+        ValueError: if any value does not carry the current
+            ``FINGERPRINT_VERSION`` prefix.
+    """
+    hexes: dict[str, str] = {}
+    for value in sorted(set(fingerprints)):
+        version, separator, hex_part = value.partition(":")
+        if not separator or version != FINGERPRINT_VERSION:
+            msg = f"not a {FINGERPRINT_VERSION} fingerprint: {value!r}"
+            raise ValueError(msg)
+        hexes[value] = hex_part
+
+    max_length = max((len(hex_part) for hex_part in hexes.values()), default=min_length)
+    length = min_length
+    while length < max_length:
+        prefixes = [hex_part[:length] for hex_part in hexes.values()]
+        if len(set(prefixes)) == len(prefixes):
+            break
+        length += 1
+
+    return {
+        value: f"{FINGERPRINT_VERSION}:{hex_part[:length]}" for value, hex_part in hexes.items()
+    }

@@ -52,11 +52,16 @@ class Package:
     `name` and `version` are the installed package's identity, not the
     vulnerability's — they are two of the four ingredients of the `sca`
     fingerprint (ADR §5); the vulnerability identifier itself travels as
-    `Finding.rule_id`.
+    `Finding.rule_id`. `fixed_version` is the version that resolves the
+    vulnerability, `None` when the tool reports none available — it is
+    display data for the `sca` report table's `FIXED` column (ADR §7), never
+    a fingerprint ingredient, so a fix becoming available later does not
+    change a finding's identity.
     """
 
     name: str
     version: str
+    fixed_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

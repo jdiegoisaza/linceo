@@ -20,6 +20,7 @@ from typing import Protocol, runtime_checkable
 from linceo.core.context import ExecutionContext
 from linceo.core.execution import DataSource
 from linceo.core.findings import Category, RawFinding
+from linceo.core.report_schema import ReportSchema
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,4 +101,15 @@ class ToolIntegration(Protocol):
 
     def native_severity_domain(self) -> frozenset[str]:
         """Declare this tool's complete native severity value domain (ADR §6)."""
+        ...
+
+    def report_schema(self) -> ReportSchema:
+        """Declare this category's console table columns (ADR §7).
+
+        The reporter renders whatever `ReportSchema` a category declares
+        with no conditional of its own on category or tool name — this is
+        where a category's `LOCATION` shape and extra columns (e.g. `sca`'s
+        `MANIFEST`/`FIXED`) enter the pipeline as data, not as rendering
+        code.
+        """
         ...

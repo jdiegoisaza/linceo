@@ -99,6 +99,14 @@ convention = "google"
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
+# Typer's own API requires `typer.Option(...)`/`typer.Argument(...)` calls as
+# parameter defaults (ADR §8.3) — B008 already tolerates this for `bool`
+# parameters (Typer's own idiom for flags) but not for any other type, so
+# every other CLI option needs the same exemption made explicit here rather
+# than a `# noqa: B008` on every non-boolean `--flag`.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
 # Base configuration, applied to every mypy invocation below. `core/` is
 # additionally checked with `--strict` as a separate CLI invocation (see
 # CONTRIBUTING.md) — mypy has no per-module `strict = true` override flag,

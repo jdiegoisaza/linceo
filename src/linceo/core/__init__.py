@@ -11,13 +11,6 @@ boundaries", for the full rule and
 ``tests/unit/test_import_boundaries.py`` for how it is enforced.
 """
 
-from linceo.core.baseline import (
-    Baseline,
-    BaselineConfigurationError,
-    BaselineEntry,
-    BaselineOutcome,
-    apply_baseline,
-)
 from linceo.core.config import Config, ConfigurationError, load_config
 from linceo.core.context import ExecutionContext, Platform
 from linceo.core.dedup import deduplicate
@@ -37,6 +30,18 @@ from linceo.core.normalization import (
     UnresolvedSeverityError,
     normalize_finding,
 )
+from linceo.core.policy import (
+    ConfigLayer,
+    Exclusion,
+    ExclusionOutcome,
+    Policy,
+    PolicyConfigurationError,
+    ThresholdResolution,
+    Thresholds,
+    ToolSkip,
+    apply_exclusions,
+    thresholds_from_fail_on,
+)
 from linceo.core.ports import ContextProvider, ProcessResult, ToolExecutor, ToolIntegration
 from linceo.core.registry import (
     CONTEXT_PROVIDER_ENTRY_POINT_GROUP,
@@ -44,8 +49,9 @@ from linceo.core.registry import (
     PluginRegistry,
     UnknownPluginError,
 )
+from linceo.core.report_schema import Column, ReportSchema, Truncate
 from linceo.core.reporters import render_console, render_json
-from linceo.core.results import RunResult, RunStatus, Verdict
+from linceo.core.results import RunResult, RunStatus, ThresholdBreach, Verdict
 from linceo.core.severity import SEVERITY_ORDER, Severity, SeveritySource
 
 __all__ = [
@@ -56,15 +62,15 @@ __all__ = [
     "EXIT_TOOL_EXECUTION_FAILED",
     "SEVERITY_ORDER",
     "TOOL_INTEGRATION_ENTRY_POINT_GROUP",
-    "Baseline",
-    "BaselineConfigurationError",
-    "BaselineEntry",
-    "BaselineOutcome",
     "Category",
+    "Column",
     "Config",
+    "ConfigLayer",
     "ConfigurationError",
     "ContextProvider",
     "DataSource",
+    "Exclusion",
+    "ExclusionOutcome",
     "ExecutionContext",
     "ExecutionStatus",
     "Finding",
@@ -72,20 +78,28 @@ __all__ = [
     "Package",
     "Platform",
     "PluginRegistry",
+    "Policy",
+    "PolicyConfigurationError",
     "ProcessResult",
     "RawFinding",
+    "ReportSchema",
     "RunResult",
     "RunStatus",
     "Severity",
     "SeverityNormalizer",
     "SeveritySource",
+    "ThresholdBreach",
+    "ThresholdResolution",
+    "Thresholds",
     "ToolExecution",
     "ToolExecutor",
     "ToolIntegration",
+    "ToolSkip",
+    "Truncate",
     "UnknownPluginError",
     "UnresolvedSeverityError",
     "Verdict",
-    "apply_baseline",
+    "apply_exclusions",
     "compute_exit_code",
     "count_by_severity",
     "deduplicate",
@@ -95,4 +109,5 @@ __all__ = [
     "render_console",
     "render_json",
     "run",
+    "thresholds_from_fail_on",
 ]

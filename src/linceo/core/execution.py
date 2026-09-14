@@ -20,12 +20,17 @@ class ExecutionStatus(StrEnum):
     `FAILED` and `SKIPPED` are both *absence of evidence*, not "zero
     findings" — a run containing either defaults to failing the whole run
     (`RunResult.status = partial`) rather than reporting a clean verdict
-    over incomplete evidence (ADR §5, "Fallo parcial").
+    over incomplete evidence (ADR §5, "Fallo parcial"). `SKIPPED_BY_POLICY`
+    is different in kind, not just in name: it is a declared, caducable
+    absence with an owner and a deadline (a `ToolSkip`, ADR §8), not an
+    accidental one — a run containing it still completes normally and its
+    gate is still evaluated (ADR §5, §8).
     """
 
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    SKIPPED_BY_POLICY = "skipped_by_policy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +59,9 @@ class ToolExecution:
     simply was never there.
 
     `exit_code` and `finished_at` are `None` when the tool never ran at all
-    (`status = SKIPPED`, e.g. its binary was absent from `PATH`).
+    — `status = SKIPPED` (e.g. its binary was absent from `PATH`) or
+    `status = SKIPPED_BY_POLICY` (an active `ToolSkip`, ADR §8), in which
+    case `argv` is also empty: the tool was never even invoked.
     """
 
     tool: str

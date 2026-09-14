@@ -475,8 +475,8 @@ convierta en una fuga permanente el día del release.
   hallazgos agregados, un único `Verdict`.
 - **`ToolExecution`:** herramienta, versión detectada, categoría, línea de comandos
   invocada (redactada, ver §9), tiempos de inicio/fin, código de salida nativo de la
-  herramienta, estado (`completed | failed | skipped`), hallazgos producidos,
-  `data_sources[]` (ver frescura, abajo).
+  herramienta, estado (`completed | failed | skipped | skipped_by_policy`), hallazgos
+  producidos, `data_sources[]` (ver frescura, abajo).
 
 **El gate recibe siempre un `RunResult` completo, nunca la salida cruda de una sola
 herramienta.** Esto se fuerza en la firma del tipo, no solo en la documentación: no
@@ -493,6 +493,19 @@ lo contrario. Es la misma clase de mentira, estructuralmente, que un reporte "li
 producido con una base de datos de vulnerabilidades desactualizada (ver frescura, abajo)
 — y se trata con el mismo principio: nunca declarar limpio sin declarar también qué tan
 completa es la evidencia detrás de esa declaración.
+
+**Excepción deliberada: la omisión sancionada por política.** Un `ToolSkip` configurado
+(§8.4) — herramienta, motivo, responsable, fecha límite obligatoria — produce una
+ejecución `skipped_by_policy`, no `skipped`. La distinción no es cosmética: `skipped`
+(binario ausente) y `failed` (crash) son ausencia de evidencia *accidental*, y por eso
+vuelven el run `partial`; `skipped_by_policy` es una ausencia *declarada*, con nombre,
+responsable y vencimiento, exactamente lo contrario de lo que esta subsección castiga.
+Un run con solo ejecuciones `completed` y `skipped_by_policy` es `RunStatus.completed`,
+el gate se evalúa con normalidad, y el reporte destaca la omisión por su nombre (§7) en
+vez de fallar en silencio o fallar el pipeline por una decisión que el propio pipeline
+declaró de antemano. Vencido el `ToolSkip`, la herramienta vuelve a ejecutarse sin
+intervención adicional — la caducidad no es un caso de error, es el mecanismo normal de
+recuperación.
 
 ### Deduplicación
 
@@ -718,6 +731,19 @@ propósito, no un descuido. Mapear el fallback a LOW escondería el problema rea
 detrás de ruido de baja prioridad; mapearlo a CRITICAL produciría fatiga de alertas
 sobre casos que pueden ser benignos.
 
+### La escala normalizada es el espacio de claves de los umbrales del gate
+
+El gate (§8.1) no tiene su propio vocabulario de severidad: sus umbrales —tanto el
+`--fail-on` plano como la tabla `[thresholds]` de un archivo de política (§8.4)— se
+declaran exclusivamente sobre los cinco niveles de esta sección. Eso hace concreta, y
+verificable en carga en vez de solo aspiracional, la frase ya escrita arriba: **`INFO`
+nunca bloquea el gate, bajo ninguna configuración de umbral**. Antes de esta revisión
+del contrato, `--fail-on info` se aceptaba en el CLI sin producir jamás un
+incumplimiento — una promesa que dependía de que nadie probara el caso. Ahora,
+`INFO` como cutoff o como clave de `[thresholds]` es directamente **error de
+configuración** (código de salida 2, §8): la única forma de que la garantía de esta
+sección deje de ser una promesa y pase a ser un invariante comprobado.
+
 ### Verificación
 
 - **Test dirigido por tabla** que enumera el dominio nativo completo y declarado de
@@ -785,6 +811,105 @@ modelo canónico interno del proyecto.
 SARIF 2.1.0, **vendorizado dentro del repositorio**. Validar contra una URL remota del
 esquema rompería R2 en la propia suite de tests del proyecto.
 
+### Tabla normalizada de hallazgos en consola
+
+Antes de esta revisión del contrato, el reporte de consola imprimía un volcado de
+conteos por severidad sin una sola línea por hallazgo. Fijado aquí: **una tabla de
+texto plano por categoría**, con un contrato de columnas idéntico para toda categoría
+presente y futura, para que añadir Trivy (o cualquier otra herramienta de una
+categoría ya cubierta) nunca exija tocar el reporter.
+
+**Columnas base, en este orden, iguales para toda categoría:**
+
+| Columna | Contenido |
+|---|---|
+| `SEVERITY` | La severidad normalizada (§6) del hallazgo. |
+| `ID` | `rule_id` en `secrets`; identificador de vulnerabilidad (CVE/GHSA) en `sca`. |
+| `LOCATION` | Forma específica de categoría — ver abajo. |
+| `TOOL` | `Finding.tool`, la procedencia (§5). |
+| `FP` | Prefijo corto de la huella, único dentro del run — ver abajo. |
+
+`LOCATION` es, de las cinco, la única columna base cuyo contenido varía por categoría:
+`ruta:línea` en `secrets`, `paquete@versión_instalada` en `sca`. Cada categoría declara
+columnas extra que se imprimen después de las cinco base, en el orden declarado —
+`sca` añade `MANIFEST` (la ruta del manifiesto que declara la dependencia, ingrediente
+de su huella en §5, y que de otro modo desaparecería de la tabla) y `FIXED` (la versión
+que corrige el problema, o `(none)` si la herramienta no reporta ninguna). No se añade
+`INSTALLED`: ya es visible en `LOCATION`, y repetirla sería ruido.
+
+**El reporter no tiene un solo condicional por herramienta ni por categoría.** El
+contrato de columnas se declara como *dato* — un `ReportSchema` con una `Column` por
+columna (cabecera, campos de `Finding` a resolver, separador, ancho máximo, lado de
+truncado) — que cada `ToolIntegration` expone (`report_schema()`, junto a
+`native_severity_domain()` en el mismo puerto). El componente de render recorre ese
+dato genéricamente: no existe, en ningún punto del núcleo, una rama que pregunte "¿es
+esto `sca`?". Añadir una segunda herramienta de una categoría cubierta, o una tercera
+categoría, es declarar su `ReportSchema` — nunca tocar el renderizador.
+
+**Orden y determinismo (R3):** una tabla por categoría, ordenada por severidad
+descendente y, dentro de la misma severidad, por `LOCATION` y luego por huella completa
+— el tercer criterio garantiza orden total incluso ante un empate exacto en los dos
+primeros. Los anchos de columna se derivan del propio contrato y de las filas que se
+están imprimiendo, nunca del terminal: el módulo de render no consulta
+`shutil.get_terminal_size`, `os.get_terminal_size` ni `isatty` en ningún punto — ese es,
+literalmente, el mecanismo de verificación (un test comprueba que el módulo no importa
+`shutil`, `os` ni `sys` en absoluto). "Ancho fijo" significa fijo *para esa tabla*, no
+una constante universal: se recalcula a partir del contenido en cada render, pero el
+resultado no cambia si se ejecuta dos veces sobre los mismos datos, con o sin TTY.
+
+**Rutas largas se truncan por la izquierda**, conservando el final — nombre de archivo
+y línea en `secrets`, la ruta del manifiesto en `sca` — con un prefijo `...` visible.
+Truncar por la derecha, el caso general de una columna sin una cola significativa (como
+una descripción larga), conserva en cambio el inicio.
+
+**El secreto nunca se imprime.** No por una regla de redacción en el reporter, sino
+porque `Finding` no tiene, en ningún campo, el valor en claro (§5, §9) — la propia
+forma del modelo hace la fuga estructuralmente imposible en esta capa, sin depender de
+que nadie recuerde redactarla.
+
+**`FP` — el prefijo corto de huella:** `v1:` más los primeros N caracteres hexadecimales
+de la huella completa, con N el mínimo (desde 8) que mantiene único cada prefijo *dentro
+de las huellas del run actual* — suprimidas incluidas, para que dos hallazgos que
+difieren solo en si están suprimidos nunca compartan el mismo `FP` visible. Es
+exactamente lo que alguien copia para poner un hallazgo en una exclusión (§8.4): el
+esquema de exclusiones acepta la huella completa o un prefijo, y si un prefijo
+configurado resulta ambiguo contra los hallazgos de un run concreto —cosa que solo
+puede saberse en ese run, nunca en el momento en que se escribió la exclusión—, es
+error de configuración explícito, nunca una supresión silenciosa del hallazgo
+equivocado. La unicidad de `FP` es una garantía de *este run*, no de todos los runs
+futuros: un prefijo corto copiado hoy podría, en teoría, dejar de ser único cuando
+aparezca un hallazgo nuevo con el mismo prefijo — el mismo mecanismo de ambigüedad lo
+detecta entonces, en vez de fallar en silencio.
+
+### Volumen del reporte de consola
+
+- **Sin hallazgos activos en una categoría:** una sola línea (`secrets: No findings.`),
+  nunca una tabla vacía con solo cabecera.
+- **Más hallazgos que el límite configurado:** se muestran los primeros N (`--max-rows`,
+  default 20), ya ordenados por severidad descendente, y una línea final indica cuántos
+  quedan fuera (`... 37 more secrets findings (showing 20 of 57)`).
+- **`--max-rows` es exclusivamente una opción de consola.** El JSON canónico —y el
+  futuro exportador SARIF, cuando exista— llevan siempre la evidencia completa, sin
+  excepción: recortar hallazgos en el formato que efectivamente consume un pipeline
+  convertiría una comodidad de lectura humana en una pérdida silenciosa de evidencia,
+  exactamente la clase de fallo que este documento trata en todas partes con el mismo
+  rigor que un defecto de seguridad. `render_json` no tiene, ni tendrá, un parámetro de
+  límite de filas.
+- **Run con `RunResult.status = partial`:** el gate nunca imprime `PASSED`, sin
+  excepción — literalmente `Gate: NOT EVALUATED — evidence is incomplete (1 of 2
+  executions did not complete)`, en vez de un veredicto positivo sobre evidencia que el
+  propio run declara incompleta (§5). Si además hay incumplimientos calculables sobre
+  la evidencia disponible, se listan igual, marcados explícitamente como evaluados
+  *a pesar de* la evidencia incompleta — nunca como el veredicto final del run.
+- **Suprimidos y exclusiones vencidas:** sus conteos se imprimen siempre,
+  incluso en cero — es precisamente el run más limpio donde más importa poder confiar
+  en que nada se barrió en silencio (§8.4). Las omisiones de herramienta activas por
+  política (§5, §8.4) se destacan en su propia línea, con herramienta, responsable y
+  fecha límite.
+- **Desvío de política:** cuando un flag o variable de entorno reemplaza por completo
+  la tabla `[thresholds]` declarada en el archivo de política (§8.1, §8.4), el reporte
+  lo anuncia en una línea explícita, antes del veredicto — nunca en silencio.
+
 ---
 
 ## §8. Diseño del CLI
@@ -816,16 +941,25 @@ documentación.
 | `--platform` | `auto` | Detecta desde variables de entorno del runner (solo dentro de los proveedores, ver R1); cae a `local` si ninguna coincide. |
 | `--tool` | default de la categoría | Un único default por categoría en v0.1 (Gitleaks para `secrets`, Trivy para `sca`). |
 | `--path` | directorio actual | — |
-| `--config` | rutas convenidas dentro del workspace | Ver R5 — nunca resuelve dentro del paquete del orquestador. |
+| `--config` | rutas convenidas dentro del workspace | Ver R5 — nunca resuelve dentro del paquete del orquestador. Un único archivo cubre umbrales, exclusiones y omisión de herramientas (§8.4), además de los ajustes escalares de esta tabla. |
 | `--output-dir` / `--format` | JSON + consola | SARIF disponible explícitamente vía `--format sarif`. |
-| `--fail-on` | **`none`** (reporta, no bloquea) | Justificación completa en §8.1. |
-| `--baseline` | ruta convenida dentro del workspace | Ver §8.2. |
+| `--fail-on` | sin valor (no reemplaza la política) | Justificación completa en §8.1. Nunca acepta `info` (§6). Dado, reemplaza por completo la tabla `[thresholds]` del archivo de política (§8.1, §8.4) — se anuncia en el reporte cuando ocurre. |
+| `--max-rows` | 20 | Filas por tabla en el reporte de consola (§7); nunca afecta a JSON ni, en el futuro, a SARIF. |
 | `--token-env` / `--token-file` | convención documentada por adaptador | Ver §9 — nunca `--token VALOR`. |
-| `--continue-on-tool-error` | desactivado | Ver §5 (fallo parcial). |
+| `--continue-on-tool-error` / `--no-continue-on-tool-error` | desactivado, sin valor propio (viene del archivo si no se pasa) | Ver §5 (fallo parcial). |
 | `--max-db-age` | umbral de §5 (7 días) | Ver §5 (frescura de datos). |
-| `--strict-normalization` | desactivado | Ver §6. |
+| `--strict-normalization` / `--no-strict-normalization` | desactivado, sin valor propio (viene del archivo si no se pasa) | Ver §6. |
 | `--dry-run` | — | Imprime la línea de comandos completa que se ejecutaría, sin secretos (ver §9), y sin ejecutar nada. |
 | `--log-level` / `--log-format` | — | — |
+
+Nota sobre `--continue-on-tool-error` y `--strict-normalization`, porque su forma
+cambió en esta revisión del contrato: antes eran flags booleanos que el CLI pasaba
+*siempre* a la resolución de configuración, con lo que el archivo de política nunca
+podía ganar aunque la cadena de §5/R5 dijera lo contrario — un defecto real, no una
+decisión de diseño. Ahora son pares `--flag/--no-flag` de tres estados: no mencionados
+en absoluto, mencionados en verdadero, o mencionados en falso; solo cuando el operador
+los menciona explícitamente entran en la capa CLI de la cadena de precedencia, y en su
+ausencia el archivo (o el default) decide, tal como exige §5/R5.
 
 Comandos auxiliares:
 
@@ -846,6 +980,15 @@ salida por consola, incluso en modo no bloqueante, **siempre** termina con la ll
 a la acción explícita: por ejemplo, *"con `--fail-on HIGH` este run habría fallado: 3
 CRITICAL, 12 HIGH"*. El modo no bloqueante por defecto no es silencioso sobre lo que
 habría pasado si estuviera activado.
+
+**Precisión de mecanismo, sin cambio de comportamiento en el caso "nada configurado":**
+el CLI ya no inyecta `none` en la capa de flags de forma incondicional — `--fail-on`
+ausente significa, literalmente, ausente de esa capa, dejando que el archivo o el
+default compilado decidan, tal como exige la cadena de §5/R5 (§8.4 documenta el defecto
+real que esto corrige). El resultado cuando nada está configurado en ninguna capa sigue
+siendo exactamente el descrito aquí: sin gate, permisivo. Lo único que cambió es que
+ahora un archivo de política puede, sin necesidad de ningún flag, activar el gate por
+sí solo — el CLI ya no se interpone forzando "ninguno" delante de él.
 
 **Descartado: `HIGH` bloqueante por defecto.** Sobre un repositorio con historia real,
 la primera ejecución pone el build en rojo de inmediato, y la reacción más probable de
@@ -883,14 +1026,52 @@ salió mal" son dos afirmaciones distintas, y solo la primera depende de este fl
 además contrato público cubierto por semver (junto con el resto de flags y códigos de
 salida): cambiar el default en una versión futura es un cambio incompatible.
 
+#### `--fail-on` es el caso simple de un mecanismo más general: umbrales por severidad
+
+Esta revisión del contrato generaliza el gate de "un único punto de corte" a "un
+conteo máximo permitido por severidad" (`[thresholds]`, detallado en §8.4), porque un
+punto de corte no puede expresar, por ejemplo, "cero CRITICAL, hasta cinco HIGH,
+hasta veinticinco MEDIUM sin bloquear" — un patrón de adopción real, no hipotético,
+donde un equipo quiere presión decreciente por severidad en vez de un único muro. La
+decisión explícita es que **`--fail-on` no queda descartado ni se le pide al operador
+que aprenda una sintaxis nueva para el caso común**: sigue siendo la forma de escribir
+"cero permitido en esta severidad y en todas las más graves" (`thresholds_from_fail_on`
+lo traduce mecánicamente), así que el contrato público de §8 —el propio flag, sus
+valores, el código de salida que produce— no cambia. Lo que cambia es que ahora existe,
+además, una forma más rica de decir lo mismo cuando la política lo necesita, declarada
+en archivo, nunca solo en flags (§8.4).
+
+**Precedencia entre `--fail-on` y `[thresholds]`: el flag gana entero, nunca se
+mezclan por severidad.** Si `--fail-on` (o su variable de entorno, `LINCEO_FAIL_ON`)
+llega desde una capa por encima del archivo en la cadena de §5/R5, reemplaza la tabla
+`[thresholds]` completa — no rellena solo las severidades que el flag no menciona.
+Alternativa descartada: fusionar por severidad (el flag fija unas, el archivo conserva
+el resto). Se descarta porque el resultado efectivo del gate dejaría de leerse en una
+sola fuente: alguien depurando un pipeline tendría que reconstruir mentalmente qué
+severidad vino de dónde. Con el flag reemplazando entero, una sola pregunta —"¿hay un
+`--fail-on` o un `LINCEO_FAIL_ON` activos?"— basta para saber si el archivo importa en
+absoluto para el gate de este run. El precio de esta simplicidad, pagado a propósito:
+**el reemplazo se anuncia siempre en el reporte** (§7), antes del veredicto, nombrando
+el mecanismo que ganó y lo que la política del archivo declaraba y perdió — un gate
+que se desvía en silencio de la política que un repositorio declaró perdería la
+confianza de quien la escribió, y ese costo es estrictamente mayor que el de una línea
+de aviso.
+
 ### §8.2. Baseline y supresiones
+
+> **Nota de esta revisión del contrato:** lo que esta sección llama "entrada de
+> baseline" se modela en código como `Exclusion` — el mismo mecanismo, generalizado
+> con un campo de alcance (ver abajo) y cargado desde el documento de política único
+> de §8.4 en vez de un fichero de baseline aparte. Cada regla descrita aquí sigue
+> vigente sin cambios; lo único que cambia es de dónde se lee la entrada.
 
 Sin un mecanismo de baseline, activar el gate sobre un repositorio con historia real
 produce, de forma predecible, cientos de hallazgos el primer día, y la reacción del
 equipo es desactivarlo — el mismo riesgo que motiva el default de §8.1, atacado desde
 el otro lado. Se resuelve con un único mecanismo que sirve a la vez para la adopción
-inicial masiva y para supresiones puntuales continuas: el baseline de adopción es un
-fichero de supresiones generado automáticamente, no un concepto de diseño distinto.
+inicial masiva y para supresiones puntuales continuas: el baseline de adopción es la
+forma *generada* del mismo esquema de exclusiones (§8.4), no un concepto de diseño
+distinto.
 
 - **Referenciado por huella (§5), nunca por ruta y número de línea.** Una supresión
   atada a ruta+línea se rompe con el primer reformateo o refactor del fichero
@@ -911,10 +1092,20 @@ fichero de supresiones generado automáticamente, no un concepto de diseño dist
   supresión) y `owner` (responsable). Una entrada sin ambos campos es inválida y el
   cargador la rechaza. Una supresión anónima y sin motivo es, en la práctica,
   indistinguible de un descuido que nadie va a poder auditar después.
-- **Es configuración de cliente, sujeta a R5:** el fichero de baseline vive en el
-  workspace escaneado, resuelto por convención o por `--baseline` explícito. **Nunca
-  en este repositorio**, ni siquiera como ejemplo con datos ficticios cargables por
-  accidente.
+- **Es configuración de cliente, sujeta a R5:** las exclusiones viven en el mismo
+  documento de política que los umbrales (§8.4), resuelto por convención o por
+  `--config` explícito — no existe un `--baseline` separado: un único archivo, una
+  única cadena de precedencia. **Nunca en este repositorio**, ni siquiera como ejemplo
+  con datos ficticios cargables por accidente.
+- **Alcance (`repositories`), añadido en esta revisión.** Una exclusión sin `repositories`
+  (o con la lista vacía) es global: aplica a cualquier repositorio que la cargue.
+  Con `repositories` no vacío, aplica únicamente cuando `ExecutionContext.repository`
+  coincide con alguno de los declarados. El caso que lo motiva es real: una
+  organización con un documento de política compartido entre varios repositorios
+  necesita poder decir "esta cadena de prueba es un falso positivo en el repositorio
+  `X`" sin suprimir accidentalmente el mismo patrón en `Y`, donde podría ser un
+  secreto real. Una exclusión fuera de alcance para el repositorio actual no cuenta
+  ni como supresión ni como vencida — es, simplemente, silenciosa para ese run.
 - **`baseline init`** genera el fichero completo a partir de un run real sobre el
   estado actual del repositorio: usa un `reason` compartido que declara "adopción
   inicial", un `owner` correspondiente a quien ejecuta el comando, y un vencimiento
@@ -1020,6 +1211,105 @@ evidencia completa — "el orquestador está roto" debe dominar sobre "el orques
 encontró hallazgos", porque son dos mensajes que un pipeline necesita poder reaccionar
 de forma distinta, y confundirlos lleva en la práctica a que se acabe ignorando a
 ambos por igual.
+
+### §8.4. Política de gate configurable en archivo
+
+Antes de esta revisión, los umbrales solo se configuraban por flag (`--fail-on`) y el
+baseline vivía, conceptualmente, en un fichero aparte nunca llegado a conectar al CLI.
+Esta sección fija un único documento — el mismo `.devsecops/config.toml` (o `--config`
+explícito) que ya resuelve la cadena de §5/R5 — que cubre tres mecanismos
+relacionados pero distintos: **umbrales** (§8.1), **exclusiones** (§8.2, generalización
+del baseline) y **omisión temporal de herramienta** (§5). Los tres se validan por
+completo **al cargar la configuración**, antes de invocar ninguna herramienta: un
+documento inválido falla con código `2` de inmediato, nunca a mitad de un run.
+
+**Esquema, con datos íntegramente sintéticos (R5):**
+
+```toml
+version = 1                      # versión del esquema del documento; solo 1 es válida hoy
+
+fail_on = "high"                 # ver §8.1 — capa "file" de la cadena de precedencia
+continue_on_tool_error = false
+strict_normalization = false
+max_expiry_horizon_days = 90     # horizonte máximo para expires_at, exclusiones y omisiones
+
+[report]
+max_rows = 20                    # solo consola (§7); JSON y SARIF llevan todo siempre
+
+[thresholds]                     # conteos máximos permitidos por severidad (§8.1)
+critical = 0
+high = 0
+medium = 25
+# `info` aquí es error de configuración (§6) — nunca un nivel de umbral válido.
+
+[[exclusions]]
+fingerprint = "v1:9c4e0a71…"     # huella completa o prefijo inequívoco (§7, "FP")
+reason = "Synthetic credential in the parser test corpus"
+owner = "team-atlas"
+expires_at = 2026-11-30          # obligatorio; sin él, error de configuración
+
+[[exclusions]]
+fingerprint = "v1:1b77de02…"
+reason = "Upstream fix pending release"
+owner = "team-atlas"
+expires_at = 2026-10-15
+repositories = ["orion-web", "orion-api"]   # ausente/vacío = alcance global (§8.2)
+
+[[skipped_tools]]
+tool = "gitleaks"
+reason = "Rollout paused while the team triages the initial backlog"
+owner = "team-atlas"
+expires_at = 2026-10-01          # vencida, la herramienta vuelve a ejecutarse (§5)
+```
+
+**Umbrales.** Ver §8.1 para la relación completa con `--fail-on`: el archivo puede
+declarar `[thresholds]` directamente, o dejar que un `fail_on` plano (misma capa,
+archivo) se traduzca vía `thresholds_from_fail_on`. Si un documento declara ambos a la
+vez, `[thresholds]` gana — es la declaración más rica del mismo documento, no una
+capa distinta, así que no cuenta como el reemplazo que §8.1 exige anunciar.
+
+**Exclusiones.** Los campos son exactamente los que §8.2 ya exigía —`fingerprint`,
+`reason`, `owner`, `expires_at` obligatorio— más `repositories` para el alcance,
+opcional y global por defecto. El `fingerprint` acepta la huella completa o un prefijo
+inequívoco (§7): si un prefijo configurado coincide con más de un hallazgo del run
+actual, es error de configuración explícito por ambigüedad — nunca una supresión
+silenciosa del hallazgo equivocado. Los hallazgos suprimidos **no cuentan para los
+umbrales** (el gate solo ve los hallazgos activos); el reporte siempre indica cuántos
+se suprimieron y cuántas exclusiones están vencidas, valgan cero (§7).
+
+**Omisión temporal de herramienta.** Mismos cuatro campos que una exclusión, pero
+sobre `tool` en vez de `fingerprint`: mientras la omisión esté vigente, esa herramienta
+no se invoca en absoluto (`ExecutionStatus.skipped_by_policy`, §5) y el run no se
+vuelve `partial` por ello — es ausencia declarada, no accidental. Vencida la fecha
+límite, la herramienta se ejecuta de nuevo automáticamente, sin ningún paso manual; la
+omisión vencida se reporta igual, para que quede visible que la herramienta volvió a
+correr.
+
+**Precedencia flag/archivo, coherente con §5/R5.** Los ajustes escalares (`fail_on`,
+`continue_on_tool_error`, `strict_normalization`, `max_expiry_horizon_days`,
+`report.max_rows`) siguen la cadena completa: CLI > variable de entorno > archivo >
+default compilado, campo por campo — una capa que no menciona un campo nunca oculta el
+valor de una capa inferior. Corrección de un defecto real detectado al construir esta
+revisión: antes, el CLI pasaba `continue_on_tool_error` y `strict_normalization` a la
+resolución de configuración *siempre*, con lo que el archivo nunca podía ganar aunque
+la cadena dijera lo contrario; ahora son pares `--flag/--no-flag` de tres estados
+(mencionado en verdadero, en falso, o no mencionado) y solo entran en la cadena cuando
+el operador los menciona explícitamente. **Exclusiones y omisión de herramienta son
+exclusivamente de archivo** — no existe un flag ni una variable de entorno equivalente:
+expresar una lista de exclusiones o de herramientas omitidas como flags individuales
+no escala más allá de un puñado de entradas, y el archivo ya es, por diseño, el lugar
+donde vive esta configuración de cliente (R5).
+
+**Diseño para una fuente remota futura, sin construirla ahora.** La función que valida
+y construye la política (`parse_policy_document`) opera sobre un mapeo ya decodificado
+— hoy, el resultado de parsear TOML — y no sabe nada sobre de dónde vino ese mapeo. Una
+fuente remota futura (mencionada como configuración remota opcional en R2, §4) solo
+necesita producir la misma forma de mapeo; el esquema, la validación de horizonte, el
+emparejamiento de huella por prefijo y todo lo demás de esta sección se reutilizan sin
+cambios. El campo `version` en la cabecera del documento existe precisamente para ese
+futuro: hoy solo `1` es válido, y cualquier otro valor es error de configuración
+explícito — la plomería de una fuente remota es trabajo posterior deliberadamente
+aplazado (§14); el esquema difícil de acertar es este.
 
 ---
 
@@ -1255,3 +1545,4 @@ cueste, en la práctica, un único `docker run` sin instalación previa de nada.
 | Sink de publicación a DefectDojo u otro sistema receptor (§1) | Que exista al menos un usuario real con esa integración como bloqueante de adopción. |
 | Proveedores de contexto para GitHub Actions y GitLab CI (§1, §10) | Demanda concreta de un usuario en esa plataforma; el contrato ya está validado con dos proveedores de máxima distancia, así que el trabajo restante es de adaptador, no de diseño. |
 | Escaneo de imágenes de contenedor en la integración de Trivy (§10) | Que el caso de uso offline-first quede suficientemente probado en producción como para justificar introducir el primer camino con credenciales de red del proyecto. |
+| Obtención remota del documento de política (§8.4) | Un usuario real con más de un repositorio necesitando compartir el mismo documento sin copiarlo a mano — el esquema ya está diseñado para que esta pieza sea plomería, no rediseño. |

@@ -7,7 +7,14 @@ no behavior of their own.
 
 from __future__ import annotations
 
-from linceo.core.fingerprint import FINGERPRINT_VERSION, sca_fingerprint, secret_fingerprint
+import pytest
+
+from linceo.core.fingerprint import (
+    FINGERPRINT_VERSION,
+    sca_fingerprint,
+    secret_fingerprint,
+    short_fingerprints,
+)
 
 
 def test_secret_fingerprint_is_versioned() -> None:
@@ -122,3 +129,61 @@ def test_sca_fingerprint_changes_with_any_ingredient() -> None:
         different_manifest,
     }
     assert len(fingerprints) == 5
+
+
+# --- short_fingerprints (ADR §7, "FP") -----------------------------------------
+
+
+def test_short_fingerprints_uses_the_minimum_length_by_default() -> None:
+    digest = "abc123"
+    full = secret_fingerprint(rule_id="aws-access-key", path="src/config.py", secret_hash=digest)
+
+    short = short_fingerprints([full])
+
+    assert short[full] == f"{FINGERPRINT_VERSION}:{full.split(':')[1][:8]}"
+
+
+def test_short_fingerprints_keeps_the_version_prefix() -> None:
+    digest = "abc123"
+    full = secret_fingerprint(rule_id="aws-access-key", path="src/config.py", secret_hash=digest)
+
+    short = short_fingerprints([full])
+
+    assert short[full].startswith(f"{FINGERPRINT_VERSION}:")
+
+
+def test_short_fingerprints_extends_length_only_far_enough_to_disambiguate() -> None:
+    """Two fingerprints sharing an 8-char prefix get a longer, but still shared-safe, length."""
+    colliding_a = (
+        f"{FINGERPRINT_VERSION}:aaaaaaaa1111111111111111111111111111111111111111111111111111"
+    )
+    colliding_b = (
+        f"{FINGERPRINT_VERSION}:aaaaaaaa2222222222222222222222222222222222222222222222222222"
+    )
+    distinct = f"{FINGERPRINT_VERSION}:bbbbbbbb3333333333333333333333333333333333333333333333333333"
+
+    short = short_fingerprints([colliding_a, colliding_b, distinct])
+
+    assert len({short[colliding_a], short[colliding_b], short[distinct]}) == 3
+    assert short[colliding_a] != short[colliding_b]
+    # every value still starts with the same 8-char shared prefix, just extended
+    assert short[colliding_a].startswith(f"{FINGERPRINT_VERSION}:aaaaaaaa")
+
+
+def test_short_fingerprints_is_stable_for_a_fixed_input_set() -> None:
+    digest_a, digest_b = "abc123", "def456"
+    fingerprints = [
+        secret_fingerprint(rule_id="aws-access-key", path="src/config.py", secret_hash=digest_a),
+        secret_fingerprint(rule_id="gcp-api-key", path="src/other.py", secret_hash=digest_b),
+    ]
+
+    assert short_fingerprints(fingerprints) == short_fingerprints(fingerprints)
+
+
+def test_short_fingerprints_rejects_a_value_without_the_current_version_prefix() -> None:
+    with pytest.raises(ValueError, match="v1"):
+        short_fingerprints(["v2:abcdef0123456789"])
+
+
+def test_short_fingerprints_of_an_empty_input_is_empty() -> None:
+    assert short_fingerprints([]) == {}

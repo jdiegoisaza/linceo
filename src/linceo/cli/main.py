@@ -8,6 +8,7 @@ the rule this module must satisfy.
 import typer
 
 from linceo import __version__
+from linceo.cli.scan import scan_app
 
 # Exit code for CLI usage errors, per
 # docs/adr/ADR-000-arquitectura-base-y-alcance-v0.1.md, §8: "usage error or
@@ -22,6 +23,7 @@ app = typer.Typer(
     add_completion=False,
     help="Orchestrate DevSecOps tool executions into a single verdict.",
 )
+app.add_typer(scan_app, name="scan")
 
 
 def _print_version_and_exit(*, show_version: bool) -> None:
@@ -43,12 +45,9 @@ def _root(
     ),
 ) -> None:
     """Orchestrate DevSecOps tool executions into a single verdict."""
-    # No subcommand exists yet — `scan`, `doctor`, and `context` land later —
-    # so every invocation that reaches here has nothing to dispatch to.
-    # Once the first subcommand is added, gate this on
-    # `ctx.invoked_subcommand is None` instead of exiting unconditionally.
-    typer.echo(ctx.get_help(), err=True)
-    raise typer.Exit(code=EXIT_USAGE_ERROR)
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help(), err=True)
+        raise typer.Exit(code=EXIT_USAGE_ERROR)
 
 
 def main() -> None:

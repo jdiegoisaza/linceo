@@ -1,0 +1,22 @@
+[
+ {
+  "RuleID": "aws-access-token",
+  "Description": "Identified a pattern that may indicate AWS credentials, risking unauthorized cloud resource access and data breaches on AWS platforms.",
+  "StartLine": 1,
+  "EndLine": 1,
+  "StartColumn": 22,
+  "EndColumn": 41,
+  "Match": "AKIAQPFM3ZXVJ7HKQZ2A",
+  "Secret": "AKIAQPFM3ZXVJ7HKQZ2A",
+  "File": "config.py",
+  "SymlinkFile": "",
+  "Commit": "fa462c52a1ed48c52095c046d540509948a5e7c1",
+  "Entropy": 3.7841837,
+  "Author": "Test",
+  "Email": "test@example.com",
+  "Date": "2026-09-13T22:20:10Z",
+  "Message": "add aws config (synthetic test fixture, not a real credential)",
+  "Tags": [],
+  "Fingerprint": "fa462c52a1ed48c52095c046d540509948a5e7c1:config.py:aws-access-token:1"
+ }
+]
