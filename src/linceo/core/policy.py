@@ -46,9 +46,17 @@ Thresholds = Mapping[Severity, int]
 DEFAULT_MAX_HORIZON_DAYS = 90
 
 #: Default number of rows a console table shows before summarizing the rest
-#: (ADR §7) — a presentation setting only; JSON (and, later, SARIF) always
-#: carry every finding.
+#: (ADR §7) — a presentation setting only; JSON (and SARIF) always carry
+#: every finding.
 DEFAULT_REPORT_MAX_ROWS = 20
+
+#: Default staleness threshold for a `ToolIntegration` data source's
+#: `built_at` (ADR §5, "Frescura de las fuentes de datos") — a data source
+#: older than this many days is flagged stale. Configurable in the ADR's
+#: full design via `--max-db-age` (not yet built); `linceo.cli.doctor` uses
+#: this same default directly today, so the one place this number is
+#: declared does not drift the day that flag exists.
+DEFAULT_MAX_DATA_SOURCE_AGE_DAYS = 7
 
 
 class PolicyConfigurationError(Exception):

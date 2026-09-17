@@ -1,0 +1,168 @@
+# Reusable Azure Pipelines steps template around the linceo reference
+# container image (ADR §4/R4, §7; docs/ADOPTION.md).
+#
+# Designed to be inserted, by reference, more than once in the same
+# pipeline, at different points, each invocation completely independent
+# of the others (ADR §1: "N ejecuciones de herramienta en un mismo run,
+# con estado por ejecución" — applied here at the pipeline level, not
+# just inside a single linceo run): a `secrets` scan right after checkout
+# and an `sca` scan after dependencies are restored is the pattern
+# `azure-pipelines/examples/two-stage-scan.yml` shows end to end.
+#
+# What this template does NOT decide for you:
+#   - Severity thresholds. `failOn` here is an optional override of
+#     `--fail-on` (ADR §8.1) — leave it empty (the default) and the
+#     workspace's own `.devsecops/config.toml` decides, exactly as it
+#     would from a plain `linceo scan` invocation outside a container
+#     (ADR §5/R5's precedence chain). No client-specific threshold value
+#     is hardcoded here, on purpose (ADR R5).
+#   - Registry authentication. If `imageRepository` points at a private
+#     registry, add whatever login step your organization already uses
+#     (a `Docker@2` task with `command: login`, or a preceding `docker
+#     login`) before the step this template expands to.
+#
+# Usage (see the working example for the full picture):
+#
+#   steps:
+#     - template: ../templates/linceo-scan.yml
+#       parameters:
+#         category: secrets
+#         imageRepository: contoso.azurecr.io/linceo
+#         imageTag: '0.3.0'
+#         blocking: false
+
+parameters:
+  - name: category
+    type: string
+    values:
+      - secrets
+      - sca
+
+  - name: path
+    type: string
+    default: ''
+    # Relative to the repository root; empty scans the whole checkout.
+    # Always mounted as the *full* checkout regardless of this value (see
+    # the step script below) — `local`'s own `ContextProvider` (ADR §10)
+    # resolves `repository`/`commit` against the checkout as a whole even
+    # when only a subdirectory is scanned, which requires `.git` to still
+    # be reachable from the mount.
+
+  - name: configPath
+    type: string
+    default: ''
+    # Relative to the repository root. Empty lets linceo fall back to its
+    # own conventional `.devsecops/config.toml` lookup inside the scanned
+    # path (ADR §5/R5) — set this only when a repository's policy file
+    # does not live at that convention.
+
+  - name: imageRepository
+    type: string
+    # No default: this template is meant to be shared across repositories
+    # with different registries (ADR R5 — no client-specific value lives
+    # committed here). Example: contoso.azurecr.io/linceo
+
+  - name: imageTag
+    type: string
+    # No default, deliberately: the whole point of ADR R4's digest/version
+    # pinning is that nothing in this project's distribution resolves
+    # "whatever is newest" implicitly. Pin an exact tag, e.g. '0.3.0'.
+
+  - name: blocking
+    type: boolean
+    default: true
+    # false: the step can find and report problems without failing the
+    # build (`continueOnError: true` below) — the "observación" rollout
+    # stage (docs/ADOPTION.md). true: a non-zero linceo exit code fails
+    # this step, and therefore the job, exactly like running the binary
+    # directly would. This never edits linceo's own gate configuration —
+    # see `failOn` above; a non-blocking step can still be configured to
+    # compute a real (not "none") verdict, so its console/SARIF output
+    # says what *would* have failed once the step becomes blocking.
+
+  - name: failOn
+    type: string
+    default: ''
+    # Optional override of `--fail-on` (ADR §8.1) — one of `none`, `low`,
+    # `medium`, `high`, `critical`. Empty (the default) passes no such
+    # flag at all, leaving the workspace's own policy file (or linceo's
+    # own compiled default) to decide, per the ADR §5/R5 precedence chain.
+
+  - name: stepName
+    type: string
+    default: 'linceo_${{ parameters.category }}'
+    # Disambiguates this invocation's display name, its staged SARIF file,
+    # its published artifact name, and its own step reference name (used
+    # below to expose `exitCode` as an output variable) from any other
+    # invocation of this same template elsewhere in the pipeline —
+    # required the moment the same category runs twice (e.g. two
+    # subdirectories of a monorepo). Must be a valid Azure Pipelines step
+    # reference name if overridden: letters, digits, and underscores only
+    # (no hyphens or dots) — the default already satisfies this.
+
+steps:
+  - bash: |
+      set -u
+
+      IMAGE="${{ parameters.imageRepository }}:${{ parameters.imageTag }}"
+      SCAN_PATH="${{ parameters.path }}"
+      CONFIG_PATH="${{ parameters.configPath }}"
+      FAIL_ON="${{ parameters.failOn }}"
+      SOURCES_DIR="$(Build.SourcesDirectory)"
+      REPORT_FILE="$(Agent.TempDirectory)/${{ parameters.stepName }}.sarif"
+
+      if [ -n "${SCAN_PATH}" ]; then
+        TARGET_PATH="/workspace/${SCAN_PATH}"
+      else
+        TARGET_PATH="/workspace"
+      fi
+
+      LINCEO_ARGS=(scan "${{ parameters.category }}" --path "${TARGET_PATH}" --format sarif)
+      if [ -n "${CONFIG_PATH}" ]; then
+        LINCEO_ARGS+=(--config "/workspace/${CONFIG_PATH}")
+      fi
+      if [ -n "${FAIL_ON}" ]; then
+        LINCEO_ARGS+=(--fail-on "${FAIL_ON}")
+      fi
+
+      echo "Running: docker run --rm -v ${SOURCES_DIR}:/workspace ${IMAGE} ${LINCEO_ARGS[*]}"
+
+      docker run --rm \
+        -v "${SOURCES_DIR}:/workspace" \
+        "${IMAGE}" \
+        "${LINCEO_ARGS[@]}" \
+        > "${REPORT_FILE}"
+      EXIT_CODE=$?
+
+      echo "##vso[task.setvariable variable=exitCode;isOutput=true]${EXIT_CODE}"
+
+      case "${EXIT_CODE}" in
+        0)
+          echo "linceo (${{ parameters.category }}): gate passed (or no threshold is configured)."
+          ;;
+        1)
+          echo "##vso[task.logissue type=warning]linceo (${{ parameters.category }}): gate failed — active findings exceed the configured threshold. See the published SARIF for detail."
+          ;;
+        2)
+          echo "##vso[task.logissue type=error]linceo (${{ parameters.category }}): usage or configuration error (exit 2) — this step's own flags, or the workspace's .devsecops/config.toml, are invalid. This is not a finding; no SARIF was produced."
+          ;;
+        3)
+          echo "##vso[task.logissue type=error]linceo (${{ parameters.category }}): tool execution failed or evidence is incomplete (exit 3) — the scanner itself did not run cleanly. Treat this as a broken step, not a clean report."
+          ;;
+        *)
+          echo "##vso[task.logissue type=error]linceo (${{ parameters.category }}): unexpected exit code ${EXIT_CODE}."
+          ;;
+      esac
+
+      exit "${EXIT_CODE}"
+    name: ${{ parameters.stepName }}
+    displayName: 'linceo scan: ${{ parameters.stepName }}'
+    continueOnError: ${{ not(parameters.blocking) }}
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish SARIF: ${{ parameters.stepName }}'
+    condition: succeededOrFailed()
+    inputs:
+      targetPath: '$(Agent.TempDirectory)/${{ parameters.stepName }}.sarif'
+      artifact: '${{ parameters.stepName }}-sarif'
+      publishLocation: 'pipeline'

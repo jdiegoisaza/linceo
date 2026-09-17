@@ -1,0 +1,38 @@
+# Only pyproject.toml, uv.lock, README.md, LICENSE, NOTICE, and src/ are
+# ever COPYed into the build (see Dockerfile) — everything below is
+# excluded purely to keep the build context small and fast, mirroring
+# .gitignore plus the directories the image build itself never touches.
+
+.git/
+.github/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+.venv/
+venv/
+.uv-cache/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+.vscode/
+.idea/
+.DS_Store
+
+.env
+.env.*
+
+docs/
+tests/
+CONTRIBUTING.md
+AGENTS.md

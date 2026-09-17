@@ -8,6 +8,7 @@ the rule this module must satisfy.
 import typer
 
 from linceo import __version__
+from linceo.cli.doctor import doctor
 from linceo.cli.scan import scan_app
 
 # Exit code for CLI usage errors, per
@@ -24,6 +25,7 @@ app = typer.Typer(
     help="Orchestrate DevSecOps tool executions into a single verdict.",
 )
 app.add_typer(scan_app, name="scan")
+app.command("doctor")(doctor)
 
 
 def _print_version_and_exit(*, show_version: bool) -> None:

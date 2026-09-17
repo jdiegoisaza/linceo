@@ -1,0 +1,88 @@
+# Working example: linceo invoked twice in the same pipeline, at two
+# different points, each an independent step with its own exit code (ADR
+# §1, §7; docs/ADOPTION.md) — secrets right after checkout, dependencies
+# once a lockfile actually exists on disk to scan.
+#
+# Entirely synthetic (no real organization, project, or repository name):
+# a generic Python project with a `requirements.txt`, meant to be adapted,
+# not copied verbatim with a company's real registry filled in.
+#
+# Run this file directly as `azure-pipelines.yml` in a project that has:
+#   - a `requirements.txt` at its root (any content — even a single pinned
+#     package — is enough for the sca step below to have something to
+#     scan);
+#   - the `linceo-scan.yml` template one directory up, exactly as this
+#     repository already ships it (`azure-pipelines/templates/`);
+#   - the `linceo` image pushed to the registry named in
+#     `linceoImageRepository` below, at the tag named in
+#     `linceoImageTag` — both are placeholders; point them at your own.
+
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Placeholders — point these at your own pushed image (ADR §4/R4: pinned
+  # by an exact tag, never `latest`).
+  linceoImageRepository: 'contoso.azurecr.io/linceo'
+  linceoImageTag: '0.3.0'
+
+stages:
+  - stage: security_and_build
+    displayName: 'Security scans and build'
+    jobs:
+      - job: build
+        displayName: 'Build and scan'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+            displayName: 'Checkout (full history — gitleaks scans it, ADR §10)'
+
+          # --- Step 1: secrets, before anything else runs -------------------
+          # Illustrative values for a repository already past the
+          # "observación"/"baseline" stages (docs/ADOPTION.md) — leaking a
+          # credential is treated as non-negotiable, so this step blocks.
+          # `blocking: true` (the template's own default) with no `failOn`
+          # override means whatever `.devsecops/config.toml` in this
+          # repository declares decides the actual threshold (ADR §5/R5).
+          - template: ../templates/linceo-scan.yml
+            parameters:
+              category: secrets
+              stepName: linceo_secrets
+              imageRepository: $(linceoImageRepository)
+              imageTag: $(linceoImageTag)
+              blocking: true
+
+          # A build step exists here on purpose, between the two scans: the
+          # `sca` step below scans whatever manifest exists on disk at the
+          # time it runs — the pattern this example demonstrates is that
+          # each linceo invocation is independent and can be placed
+          # wherever it makes sense in the pipeline's own timeline, not
+          # that `sca` specifically requires a completed build to run at
+          # all (Trivy reads `requirements.txt` directly; it would work
+          # immediately after checkout too).
+          - script: |
+              set -eu
+              python -m venv .venv
+              . .venv/bin/activate
+              pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: 'Install dependencies'
+
+          # --- Step 2: dependencies, once the build above has run ----------
+          # Illustrative values for a repository still in "baseline"
+          # (docs/ADOPTION.md): non-blocking, but with an explicit `failOn`
+          # override so the console/SARIF output already says what *would*
+          # fail once this step becomes blocking too.
+          - template: ../templates/linceo-scan.yml
+            parameters:
+              category: sca
+              stepName: linceo_sca
+              imageRepository: $(linceoImageRepository)
+              imageTag: $(linceoImageTag)
+              blocking: false
+              failOn: high

@@ -31,6 +31,7 @@ from linceo.core.normalization import (
     normalize_finding,
 )
 from linceo.core.policy import (
+    DEFAULT_MAX_DATA_SOURCE_AGE_DAYS,
     ConfigLayer,
     Exclusion,
     ExclusionOutcome,
@@ -64,9 +65,15 @@ from linceo.core.tool_config import (
     render_passthrough_flags,
     resolve_tool_config,
 )
+from linceo.core.version_range import (
+    InvalidVersionRangeError,
+    parse_version,
+    version_satisfies,
+)
 
 __all__ = [
     "CONTEXT_PROVIDER_ENTRY_POINT_GROUP",
+    "DEFAULT_MAX_DATA_SOURCE_AGE_DAYS",
     "EXIT_CONFIGURATION_ERROR",
     "EXIT_GATE_FAILED",
     "EXIT_OK",
@@ -87,6 +94,7 @@ __all__ = [
     "ExecutionContext",
     "ExecutionStatus",
     "Finding",
+    "InvalidVersionRangeError",
     "Location",
     "Package",
     "PassthroughValue",
@@ -124,6 +132,7 @@ __all__ = [
     "normalize_finding",
     "parse_tool_configs",
     "parse_tool_defaults",
+    "parse_version",
     "render_console",
     "render_json",
     "render_passthrough_flags",
@@ -131,4 +140,5 @@ __all__ = [
     "resolve_tool_config",
     "run",
     "thresholds_from_fail_on",
+    "version_satisfies",
 ]
