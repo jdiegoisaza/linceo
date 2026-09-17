@@ -79,10 +79,47 @@ jobs:
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      # Copied verbatim from gitleaks' own published
+      # gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz.sha256 entry for this
+      # release — the same version, and the same checksum-verification
+      # practice, the reference container image pins (ADR R4, Dockerfile).
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
     steps:
       - uses: actions/checkout@v4
         with:
+          # Full history, not just the pushed range: gitleaks (via linceo's
+          # `secrets` integration) scans it entirely by design (ADR §10) —
+          # this is also, precisely, what a range-based diff scan
+          # (gitleaks-action's approach) cannot do on a repository's first
+          # push, where the range's parent commit does not exist yet.
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install gitleaks (pinned, checksum-verified)
+        run: |
+          set -eu
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          printf '%s  gitleaks.tar.gz\n' "${GITLEAKS_SHA256}" > gitleaks.tar.gz.sha256
+          sha256sum -c gitleaks.tar.gz.sha256
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod 0755 gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          rm -f gitleaks.tar.gz gitleaks.tar.gz.sha256
+          gitleaks version
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+
+      - name: linceo scan secrets (dogfooding this project's own tool)
+        run: uv run linceo scan secrets --format sarif > linceo-secrets.sarif
+
+      - name: Upload SARIF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linceo-secrets-sarif
+          path: linceo-secrets.sarif

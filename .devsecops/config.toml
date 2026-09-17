@@ -1,0 +1,25 @@
+# linceo's own policy document — dogfooding this project's tool on its own
+# source (ADR §4/R5's precedent: "gitleaks como hook de pre-commit desde el
+# commit #1"). Not client configuration: R5 is about a *consumer's* values
+# never living in this repository, and this repository is the one being
+# scanned here, exactly the same way `.gitleaks.toml` (repo root) already
+# is gitleaks' own equivalent for this same repository.
+version = 1
+
+# Equivalent strictness to what `gitleaks-action` enforced before this CI
+# job started calling linceo instead: it failed the job on any leak found,
+# with no severity concept of its own. Every `secrets` finding is at least
+# HIGH by category default (ADR §6 — gitleaks emits no native severity), so
+# `fail_on = "high"` blocks on the same set of findings `gitleaks-action`
+# did, never more permissively.
+fail_on = "high"
+
+[tools.gitleaks]
+# Keeps `.gitleaks.toml`'s own [extend]/[allowlist] — the synthetic-fixture
+# allowlist under tests/ (see that file) — applying exactly as it did under
+# `gitleaks-action`, which read it by gitleaks' own convention (a bare
+# `.gitleaks.toml` at the scanned root). `GitleaksIntegration.build_command`
+# (ADR §8.5) translates this into gitleaks' own `--config` flag; relative to
+# the scanned workspace root, which is this repository's own root in CI
+# (`.github/workflows/ci.yml`, job "secrets").
+custom_rules_path = ".gitleaks.toml"
