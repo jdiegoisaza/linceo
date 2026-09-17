@@ -15,6 +15,7 @@ there are two.
 
 import shlex
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -25,25 +26,30 @@ from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.adapters.subprocess_executor import SubprocessToolExecutor
 from linceo.adapters.trivy import TRIVY_NATIVE_SEVERITY_MAP, TrivyIntegration, TrivyOutputError
 from linceo.core.config import Config, ConfigurationError, load_config
+from linceo.core.context import ContextResolutionError, Platform
 from linceo.core.engine import run
 from linceo.core.exit_codes import EXIT_CONFIGURATION_ERROR, compute_exit_code
 from linceo.core.findings import Category
 from linceo.core.normalization import SeverityNormalizer
 from linceo.core.policy import PolicyConfigurationError
-from linceo.core.ports import ToolExecutor, ToolIntegration
+from linceo.core.ports import ContextProvider, ToolExecutor, ToolIntegration
 from linceo.core.reporters import render_console, render_json
+from linceo.core.sarif import render_sarif
 from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError, resolve_tool_config
+from linceo.providers.azure_devops import AzureDevOpsContextProvider
+from linceo.providers.detection import detect_platform
 from linceo.providers.environment import process_environment
-from linceo.providers.local import ContextResolutionError, LocalContextProvider
+from linceo.providers.local import LocalContextProvider
 
 scan_app = typer.Typer(help="Run a scan category against a workspace and produce one verdict.")
 
 
 class OutputFormat(StrEnum):
-    """Report formats `scan <category>` can render today (ADR §7 minus SARIF, not yet built)."""
+    """Report formats `scan <category>` can render (ADR §7): console, JSON, and SARIF 2.1.0."""
 
     CONSOLE = "console"
     JSON = "json"
+    SARIF = "sarif"
 
 
 class FailOnOption(StrEnum):
@@ -60,6 +66,42 @@ class FailOnOption(StrEnum):
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+
+class PlatformOption(StrEnum):
+    """CI platform to resolve `ExecutionContext` from, plus the `auto` sentinel (ADR §4 R1, §8).
+
+    Kept separate from `linceo.core.context.Platform` for the same reason
+    `FailOnOption` is kept separate from `Severity`: `auto` is not itself a
+    platform an `ExecutionContext` can be resolved for, only an instruction
+    to run `linceo.providers.detection.detect_platform` and use whatever it
+    returns.
+    """
+
+    AUTO = "auto"
+    LOCAL = "local"
+    AZURE_DEVOPS = "azure_devops"
+
+
+def _resolve_context_provider(
+    *, platform: PlatformOption, workspace_path: str, env: Mapping[str, str]
+) -> ContextProvider:
+    """Construct the `ContextProvider` `--platform` (or its `auto` detection) selects.
+
+    `auto`'s check order is declared exactly once, in
+    `linceo.providers.detection.detect_platform` (ADR §4 R1, §8) — this
+    function never re-implements or second-guesses it, only translates the
+    resulting `Platform` (or an explicit `--platform` override, which skips
+    detection entirely) into a constructed provider. Every provider gets
+    the same `workspace_path` regardless of which one is chosen — see
+    `linceo.providers.azure_devops`'s module docstring for why
+    `azure_devops` needs it passed in exactly like `local` does, rather
+    than reading the runner's own checkout root from its environment.
+    """
+    resolved = detect_platform(env) if platform is PlatformOption.AUTO else Platform(platform.value)
+    if resolved is Platform.AZURE_DEVOPS:
+        return AzureDevOpsContextProvider(workspace_path=workspace_path)
+    return LocalContextProvider(workspace_path=workspace_path)
 
 
 def _package_root() -> str:
@@ -90,6 +132,7 @@ def _cli_overrides(
 def _load_resolved_config(
     *,
     cli_overrides: dict[str, str],
+    env: Mapping[str, str],
     config_path: Path | None,
     workspace_path: str,
     now: datetime,
@@ -98,7 +141,7 @@ def _load_resolved_config(
     try:
         return load_config(
             cli_overrides=cli_overrides,
-            env=process_environment(),
+            env=env,
             explicit_config_path=str(config_path) if config_path is not None else None,
             workspace_path=workspace_path,
             package_root=_package_root(),
@@ -113,6 +156,7 @@ def _run_scan(
     *,
     category: Category,
     integration: ToolIntegration,
+    context_provider: ContextProvider,
     workspace_path: str,
     executor: ToolExecutor,
     normalizer: SeverityNormalizer,
@@ -124,8 +168,9 @@ def _run_scan(
     """Resolve `integration`'s `ToolConfig`, run it, and report — shared by every `scan` command.
 
     Everything from here on is identical for `secrets` and `sca`: only the
-    already-constructed `integration`, its `category`, the `executor` it
-    was detected through, and the `SeverityNormalizer` it needs differ by
+    already-constructed `integration`, its `category`, the `context_provider`
+    `--platform` (or its `auto` detection) selected, the `executor` it was
+    detected through, and the `SeverityNormalizer` it needs differ by
     caller.
     """
     tool_config = resolve_tool_config(
@@ -145,7 +190,7 @@ def _run_scan(
     try:
         result = run(
             run_id=uuid.uuid4().hex,
-            context_provider=LocalContextProvider(workspace_path=workspace_path),
+            context_provider=context_provider,
             integrations={category: integration},
             executor=executor,
             normalizer=normalizer,
@@ -166,12 +211,13 @@ def _run_scan(
         if execution.message is not None:
             typer.echo(execution.message, err=True)
 
-    schemas = {category: integration.report_schema()}
-    report = (
-        render_json(result)
-        if output_format is OutputFormat.JSON
-        else render_console(result, schemas=schemas, max_rows=resolved_config.report_max_rows)
-    )
+    if output_format is OutputFormat.JSON:
+        report = render_json(result)
+    elif output_format is OutputFormat.SARIF:
+        report = render_sarif(result)
+    else:
+        schemas = {category: integration.report_schema()}
+        report = render_console(result, schemas=schemas, max_rows=resolved_config.report_max_rows)
     typer.echo(report)
 
     exit_code = compute_exit_code(
@@ -183,6 +229,15 @@ def _run_scan(
 @scan_app.command("secrets")
 def scan_secrets(
     path: Path = typer.Option(Path(), "--path", help="Workspace directory to scan."),
+    platform: PlatformOption = typer.Option(
+        PlatformOption.AUTO,
+        "--platform",
+        help=(
+            "CI platform to resolve ExecutionContext from. `auto` detects Azure Pipelines via "
+            "its TF_BUILD sentinel and falls back to `local` otherwise (ADR §4 R1, §8) — always "
+            "overridable explicitly."
+        ),
+    ),
     fail_on: FailOnOption | None = typer.Option(
         None,
         "--fail-on",
@@ -221,6 +276,7 @@ def scan_secrets(
     """Scan a workspace for secrets with Gitleaks and report a single verdict."""
     workspace_path = str(path.resolve())
     now = datetime.now(UTC)
+    env = process_environment()
 
     resolved_config = _load_resolved_config(
         cli_overrides=_cli_overrides(
@@ -229,9 +285,13 @@ def scan_secrets(
             strict_normalization=strict_normalization,
             max_rows=max_rows,
         ),
+        env=env,
         config_path=config,
         workspace_path=workspace_path,
         now=now,
+    )
+    context_provider = _resolve_context_provider(
+        platform=platform, workspace_path=workspace_path, env=env
     )
 
     executor = SubprocessToolExecutor()
@@ -250,6 +310,7 @@ def scan_secrets(
     _run_scan(
         category=Category.SECRETS,
         integration=GitleaksIntegration(version=gitleaks_version),
+        context_provider=context_provider,
         workspace_path=workspace_path,
         executor=executor,
         normalizer=SeverityNormalizer(),
@@ -263,6 +324,15 @@ def scan_secrets(
 @scan_app.command("sca")
 def scan_sca(
     path: Path = typer.Option(Path(), "--path", help="Workspace directory to scan."),
+    platform: PlatformOption = typer.Option(
+        PlatformOption.AUTO,
+        "--platform",
+        help=(
+            "CI platform to resolve ExecutionContext from. `auto` detects Azure Pipelines via "
+            "its TF_BUILD sentinel and falls back to `local` otherwise (ADR §4 R1, §8) — always "
+            "overridable explicitly."
+        ),
+    ),
     fail_on: FailOnOption | None = typer.Option(
         None,
         "--fail-on",
@@ -301,6 +371,7 @@ def scan_sca(
     """Scan a workspace for vulnerable dependencies with Trivy and report a single verdict."""
     workspace_path = str(path.resolve())
     now = datetime.now(UTC)
+    env = process_environment()
 
     resolved_config = _load_resolved_config(
         cli_overrides=_cli_overrides(
@@ -309,9 +380,13 @@ def scan_sca(
             strict_normalization=strict_normalization,
             max_rows=max_rows,
         ),
+        env=env,
         config_path=config,
         workspace_path=workspace_path,
         now=now,
+    )
+    context_provider = _resolve_context_provider(
+        platform=platform, workspace_path=workspace_path, env=env
     )
 
     executor = SubprocessToolExecutor()
@@ -333,6 +408,7 @@ def scan_sca(
     _run_scan(
         category=Category.SCA,
         integration=TrivyIntegration(version=trivy_version, db_data_sources=db_data_sources),
+        context_provider=context_provider,
         workspace_path=workspace_path,
         executor=executor,
         normalizer=SeverityNormalizer(native_map=TRIVY_NATIVE_SEVERITY_MAP),

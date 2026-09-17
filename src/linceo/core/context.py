@@ -24,6 +24,19 @@ class Platform(StrEnum):
     AZURE_DEVOPS = "azure_devops"
 
 
+class ContextResolutionError(Exception):
+    """A `ContextProvider` could not resolve a required `ExecutionContext` field (ADR §10).
+
+    Shared by every `ContextProvider` implementation — originally specific
+    to `local` (a missing `git` binary, or `workspace_path` not being a git
+    checkout), generalized here once `azure_devops` became a second
+    consumer that fails the same way for a different reason (a required
+    runner-injected variable absent from the process environment). A
+    single shared type is what lets `linceo.cli.scan` catch one exception
+    regardless of which platform's provider produced it.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionContext:
     """Everything a run needs to know about where it is executing (ADR §4, R1).

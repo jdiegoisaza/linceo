@@ -12,7 +12,7 @@ boundaries", for the full rule and
 """
 
 from linceo.core.config import Config, ConfigurationError, load_config
-from linceo.core.context import ExecutionContext, Platform
+from linceo.core.context import ContextResolutionError, ExecutionContext, Platform
 from linceo.core.dedup import deduplicate
 from linceo.core.engine import run
 from linceo.core.execution import DataSource, ExecutionStatus, ToolExecution
@@ -52,6 +52,7 @@ from linceo.core.registry import (
 from linceo.core.report_schema import Column, ReportSchema, Truncate
 from linceo.core.reporters import render_console, render_json
 from linceo.core.results import RunResult, RunStatus, ThresholdBreach, Verdict
+from linceo.core.sarif import render_sarif
 from linceo.core.severity import SEVERITY_ORDER, Severity, SeveritySource
 from linceo.core.tool_config import (
     LEVEL_1_FIELD_NAMES,
@@ -79,6 +80,7 @@ __all__ = [
     "ConfigLayer",
     "ConfigurationError",
     "ContextProvider",
+    "ContextResolutionError",
     "DataSource",
     "Exclusion",
     "ExclusionOutcome",
@@ -125,6 +127,7 @@ __all__ = [
     "render_console",
     "render_json",
     "render_passthrough_flags",
+    "render_sarif",
     "resolve_tool_config",
     "run",
     "thresholds_from_fail_on",

@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from linceo.core.context import ExecutionContext, Platform
+from linceo.core.context import ContextResolutionError, ExecutionContext, Platform
 
 #: Binary name looked up on `PATH` — never a path baked in at install time.
 GIT_BINARY = "git"
@@ -25,10 +25,6 @@ GIT_BINARY = "git"
 _SCP_LIKE_REMOTE = re.compile(r"^[^/@\s]+@[^:/\s]+:(?P<path>.+?)(?:\.git)?/?$")
 #: `https://host/owner/repo.git`, `ssh://host/owner/repo.git`, and similar.
 _URL_LIKE_REMOTE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+/(?P<path>.+?)(?:\.git)?/?$")
-
-
-class ContextResolutionError(Exception):
-    """`workspace_path` is not a usable local git checkout, or `git` is unavailable (ADR §10)."""
 
 
 def _run_git(args: Sequence[str], *, cwd: str) -> str:

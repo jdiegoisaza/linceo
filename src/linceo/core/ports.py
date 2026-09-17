@@ -44,11 +44,19 @@ class ProcessResult:
 class ContextProvider(Protocol):
     """Resolves the `ExecutionContext` for a run (ADR §4, R1).
 
-    A concrete provider is constructed with whatever it needs to do that
-    (a workspace path for `local`, nothing for `azure_devops`, which reads
-    the runner's environment) — the port itself takes no arguments, so
-    that no assumption about a specific platform's inputs leaks into the
-    contract every provider must satisfy.
+    A concrete provider is constructed with whatever it needs to do that —
+    the port itself takes no arguments, so that no assumption about a
+    specific platform's inputs leaks into the contract every provider must
+    satisfy. In the two reference providers (ADR §10), that turns out to be
+    the same `workspace_path` for both: `local` needs it to know which git
+    checkout to interrogate, and `azure_devops` needs it for the same
+    reason `local` does — `ExecutionContext.workspace_path` is the
+    directory `linceo.core.engine.run` actually scans, so every provider
+    must honor a caller's requested path (e.g. a monorepo sub-directory)
+    rather than substitute a platform-specific default of its own.
+    `azure_devops` additionally reads the runner-injected process
+    environment for everything else the context needs (repository, commit,
+    branch, pull request, build id, origin URL).
     """
 
     def resolve(self) -> ExecutionContext:

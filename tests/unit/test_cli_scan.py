@@ -171,6 +171,35 @@ def test_json_format_renders_the_canonical_lossless_report(
     assert payload["verdict"]["passed"] is False
 
 
+def test_sarif_format_renders_a_sarif_2_1_0_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    stdout = (_FIXTURES / "one_finding.json").read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        "linceo.cli.scan.SubprocessToolExecutor",
+        _stub_executor_factory(
+            {
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
+                    exit_code=1, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
+                ),
+            }
+        ),
+    )
+
+    result = runner.invoke(
+        app, ["scan", "secrets", "--path", str(repo), "--format", "sarif", "--fail-on", "high"]
+    )
+
+    payload = json.loads(result.output)
+    assert payload["version"] == "2.1.0"
+    [run] = payload["runs"]
+    assert run["tool"]["driver"]["name"] == "gitleaks"
+    [sarif_result] = run["results"]
+    assert sarif_result["ruleId"] == "aws-access-token"
+
+
 def test_dry_run_prints_the_command_without_running_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

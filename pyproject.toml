@@ -46,11 +46,13 @@ linceo = "linceo.cli.main:main"
 
 [dependency-groups]
 dev = [
+  "jsonschema>=4.23",
   "mypy>=1.11",
   "pre-commit>=3.8",
   "pytest>=8.3",
   "pytest-cov>=5.0",
   "ruff>=0.6",
+  "types-jsonschema>=4.26.0.20260518",
 ]
 
 [tool.hatch.build.targets.wheel]
