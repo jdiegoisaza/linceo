@@ -1,0 +1,117 @@
+name: Release
+
+# Triggered by pushing a release tag (`vX.Y.Z`, e.g. `v0.2.0`), never by a
+# branch push — see docs/RELEASING.md for the full procedure, including the
+# recovery steps for a release that fails partway through.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Scoped to the tag itself: two different release tags may build in
+  # parallel, but the same tag can't race itself. Never cancelled
+  # mid-flight — a publish to PyPI must not be interrupted partway.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_LOCKED: "1"
+
+jobs:
+  # Mirrors the `lint`/`types`/`test` jobs in ci.yml: the publish job below
+  # must not run unless all three pass, and a release tag is not guaranteed
+  # to point at a commit that already went through ci.yml (a tag can be
+  # pushed against any commit) — so this workflow re-runs them itself
+  # rather than relying on ci.yml having already run.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  types:
+    name: Types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run mypy -p linceo
+      - run: uv run mypy tests
+      - run: uv run mypy --strict -p linceo.core
+
+  test:
+    name: Test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --frozen
+      - run: uv run pytest
+
+  publish:
+    name: Build and publish to PyPI
+    needs: [lint, types, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/linceo
+    permissions:
+      contents: read
+      # Trusted Publishing (OIDC): PyPI exchanges this token for a
+      # short-lived upload credential — no `PYPI_API_TOKEN` secret exists
+      # in this repository. Requires the `pypi` environment below to match
+      # exactly what's registered on PyPI for this project (owner
+      # `jdiegoisaza`, repo `linceo`, workflow `release.yml`, environment
+      # `pypi`).
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history *and* tags: hatch-vcs (see pyproject.toml) derives
+          # the package version from the pushed tag, and a shallow clone
+          # would hide it, silently falling back to a dev version instead.
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv build
+
+      - name: Verify the git tag and the built package version match
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          expected_version="${tag#v}"
+          wheel="$(ls dist/*.whl)"
+          actual_version="$(basename "$wheel" | cut -d- -f2)"
+          if [ "$expected_version" != "$actual_version" ]; then
+            echo "::error::Tag $tag (expected version $expected_version) does not match the built package version $actual_version. Refusing to publish — see docs/RELEASING.md." >&2
+            exit 1
+          fi
+          echo "Verified: tag $tag matches package version $actual_version"
+
+      - name: Publish to PyPI (Trusted Publishing, OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
