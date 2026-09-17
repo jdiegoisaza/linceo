@@ -17,7 +17,7 @@ from datetime import date, datetime
 
 from linceo.core.config import Config
 from linceo.core.dedup import deduplicate
-from linceo.core.execution import DataSource, ExecutionStatus, ToolExecution
+from linceo.core.execution import DataSource, ExecutionStatus, ToolExecution, ToolExecutionError
 from linceo.core.findings import Category, Finding
 from linceo.core.gate import evaluate_gate
 from linceo.core.normalization import SeverityNormalizer, normalize_finding
@@ -63,7 +63,13 @@ def _execute_one(
     evidence*, not "zero findings" (ADR §5). This is also where a
     `subprocess.TimeoutExpired` (or any other `TimeoutError`) from an
     elapsed `timeout` lands: a timed-out tool produced no usable evidence
-    either, the same as a crash.
+    either, the same as a crash. A `parse_output` failure that raises
+    `ToolExecutionError` gets `message` set to `str(exc)` on its `FAILED`
+    execution instead — the same actionable-message treatment
+    `missing_binary_hint()` gets for `SKIPPED`, generalized to any other
+    cause a `ToolIntegration` can name specifically; any other exception
+    from `parse_output` still produces a `FAILED` execution with
+    `message = None`, unchanged.
     """
     if skip is not None:
         return ToolExecution(
@@ -113,6 +119,20 @@ def _execute_one(
         raw_findings = integration.parse_output(process_result)
         findings = tuple(normalize_finding(raw, normalizer) for raw in raw_findings)
         data_sources: tuple[DataSource, ...] = tuple(integration.data_sources())
+    except ToolExecutionError as exc:
+        return ToolExecution(
+            tool=integration.name,
+            tool_version=integration.version,
+            category=category,
+            argv=argv,
+            started_at=process_result.started_at,
+            finished_at=process_result.finished_at,
+            exit_code=process_result.exit_code,
+            status=ExecutionStatus.FAILED,
+            findings=(),
+            data_sources=(),
+            message=str(exc),
+        )
     except Exception:
         return ToolExecution(
             tool=integration.name,

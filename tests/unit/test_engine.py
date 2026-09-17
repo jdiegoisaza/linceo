@@ -12,7 +12,7 @@ import pytest
 from linceo.core.config import Config, ConfigurationError, load_config
 from linceo.core.context import ExecutionContext, Platform
 from linceo.core.engine import run
-from linceo.core.execution import DataSource, ExecutionStatus
+from linceo.core.execution import DataSource, ExecutionStatus, ToolExecutionError
 from linceo.core.exit_codes import (
     EXIT_CONFIGURATION_ERROR,
     EXIT_GATE_FAILED,
@@ -232,6 +232,33 @@ def test_parse_output_failure_marks_the_execution_failed_with_no_findings() -> N
     assert execution.status is ExecutionStatus.FAILED
     assert execution.findings == ()
     assert execution.exit_code == 0
+    assert result.status is RunStatus.PARTIAL
+    assert execution.message is None
+
+
+def test_tool_execution_error_from_parse_output_surfaces_its_message_on_the_failed_execution() -> (
+    None
+):
+    """A `ToolIntegration`-named failure gets the same actionable treatment a missing binary
+    does (ADR §1 checkpoint's `missing_binary_hint`, generalized to `parse_output`)."""
+
+    @dataclass
+    class _KnownFailureIntegration(StaticToolIntegration):
+        def parse_output(self, _result: ProcessResult) -> Sequence[RawFinding]:
+            msg = "trivy's vulnerability database was never downloaded"
+            raise ToolExecutionError(msg)
+
+    trivy = _KnownFailureIntegration(
+        name="trivy", version="0.50.0", category=Category.SCA, argv=("trivy", "fs")
+    )
+    executor = FakeToolExecutor(recordings={("trivy", "fs"): _process_result(exit_code=1)})
+
+    result = _run(integrations={Category.SCA: trivy}, executor=executor, config=Config())
+
+    execution = result.executions[0]
+    assert execution.status is ExecutionStatus.FAILED
+    assert execution.findings == ()
+    assert execution.message == "trivy's vulnerability database was never downloaded"
     assert result.status is RunStatus.PARTIAL
 
 

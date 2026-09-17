@@ -1,0 +1,23 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": ".",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "requirements.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2023-37920",
+          "InstalledVersion": "2015.4.28",
+          "FixedVersion": "2023.7.22",
+          "Status": "fixed",
+          "SeveritySource": "ghsa",
+          "Title": "python-certifi: Removal of e-Tugra root certificate",
+          "Severity": "HIGH"
+        }
+      ]
+    }
+  ]
+}

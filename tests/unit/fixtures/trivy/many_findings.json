@@ -1,0 +1,94 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": ".",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "requirements.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2020-14343",
+          "PkgName": "PyYAML",
+          "InstalledVersion": "5.3",
+          "FixedVersion": "5.4",
+          "Status": "fixed",
+          "SeveritySource": "ghsa",
+          "Title": "PyYAML: incomplete fix for CVE-2020-1747",
+          "Severity": "CRITICAL",
+          "CVSS": {
+            "ghsa": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "V40Vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+              "V3Score": 9.8,
+              "V40Score": 9.3
+            },
+            "nvd": {
+              "V2Vector": "AV:N/AC:L/Au:N/C:C/I:C/A:C",
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "V2Score": 10,
+              "V3Score": 9.8
+            },
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "V3Score": 9.8
+            }
+          }
+        },
+        {
+          "VulnerabilityID": "CVE-2020-1747",
+          "PkgName": "PyYAML",
+          "InstalledVersion": "5.3",
+          "FixedVersion": "5.3.1",
+          "Status": "fixed",
+          "SeveritySource": "ghsa",
+          "Title": "PyYAML: arbitrary command execution through python/object/new when FullLoader is used",
+          "Severity": "CRITICAL",
+          "CVSS": {
+            "ghsa": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "V40Vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+              "V3Score": 9.8,
+              "V40Score": 9.3
+            },
+            "nvd": {
+              "V2Vector": "AV:N/AC:L/Au:N/C:C/I:C/A:C",
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "V2Score": 10,
+              "V3Score": 9.8
+            },
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "V3Score": 9.8
+            }
+          }
+        },
+        {
+          "VulnerabilityID": "CVE-2023-37920",
+          "PkgName": "certifi",
+          "InstalledVersion": "2015.4.28",
+          "FixedVersion": "2023.7.22",
+          "Status": "fixed",
+          "SeveritySource": "ghsa",
+          "Title": "python-certifi: Removal of e-Tugra root certificate",
+          "Severity": "HIGH",
+          "CVSS": {
+            "ghsa": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+              "V3Score": 7.5
+            },
+            "nvd": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "V3Score": 9.8
+            },
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+              "V3Score": 9.1
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

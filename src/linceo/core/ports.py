@@ -182,7 +182,19 @@ class ToolIntegration(Protocol):
         ...
 
     def parse_output(self, result: ProcessResult) -> Sequence[RawFinding]:
-        """Parse a completed `ProcessResult` into this tool's raw findings."""
+        """Parse a completed `ProcessResult` into this tool's raw findings.
+
+        Raises:
+            linceo.core.execution.ToolExecutionError: for a known,
+                anticipated failure mode this integration can name
+                specifically (e.g. a vulnerability database that was never
+                downloaded) — `linceo.core.engine` copies its message onto
+                the resulting `FAILED` execution, the same actionable
+                treatment `missing_binary_hint()` gets for `SKIPPED`. Any
+                other exception is also caught (into a `FAILED` execution
+                with no message), so a parser is free to raise its own
+                plain exception type for a generic parse failure instead.
+        """
         ...
 
     def data_sources(self) -> Sequence[DataSource]:

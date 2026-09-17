@@ -33,6 +33,27 @@ class ExecutionStatus(StrEnum):
     SKIPPED_BY_POLICY = "skipped_by_policy"
 
 
+class ToolExecutionError(Exception):
+    """A `ToolIntegration.parse_output` failure the integration itself can explain.
+
+    Raised by `parse_output` (never by `build_command`, which has its own
+    `UnsupportedToolConfigError`) for a *known, anticipated* failure mode of
+    that specific tool — the same idea `missing_binary_hint()` already
+    covers for a missing binary, generalized to any other nameable cause a
+    `ToolIntegration` runs into after its binary was found and invoked
+    successfully. `linceo.core.engine._execute_one` copies `str(exc)` into
+    the resulting `ExecutionStatus.FAILED` execution's `message`, instead of
+    leaving the operator with a bare failure and no explanation for
+    something the integration already knew how to explain.
+
+    Deliberately narrow: any *other* exception `parse_output` raises (a
+    generic parse error, e.g.) still becomes a `FAILED` execution with
+    `message = None`, exactly as before this existed — this is an opt-in
+    channel for a specific, nameable cause, not a change to what an
+    ordinary parse failure reports.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class DataSource:
     """A versioned data source a `ToolIntegration` consulted (ADR §5, "Frescura").

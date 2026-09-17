@@ -17,6 +17,14 @@ To run this suite locally with the required binaries installed:
 uv run pytest -m integration
 ```
 
-No test currently lives in this directory: there is no tool integration
-implemented yet for it to exercise (see `src/linceo/adapters/`). A test is
-added here alongside the first `ToolIntegration` implementation, not before.
+`test_gitleaks_integration.py` and `test_trivy_integration.py` exercise
+each of this project's two reference `ToolIntegration` implementations
+(see `src/linceo/adapters/`) against its real binary. A test is added here
+alongside each new `ToolIntegration` implementation, not before.
+
+`test_trivy_integration.py` additionally requires a vulnerability database
+already fetched at least once (`trivy fs --download-db-only`, or an
+equivalent already-populated `--cache-dir`) — the reference container
+image bakes one in at build time (ADR §4/R4, §5); a bare `trivy` install
+with no database yet only satisfies the subset of tests that do not
+require one (`test_detect_version_reports_the_real_installed_trivy_version`).
