@@ -83,7 +83,7 @@ class PlatformOption(StrEnum):
     AZURE_DEVOPS = "azure_devops"
 
 
-def _resolve_context_provider(
+def resolve_context_provider(
     *, platform: PlatformOption, workspace_path: str, env: Mapping[str, str]
 ) -> ContextProvider:
     """Construct the `ContextProvider` `--platform` (or its `auto` detection) selects.
@@ -97,6 +97,10 @@ def _resolve_context_provider(
     `linceo.providers.azure_devops`'s module docstring for why
     `azure_devops` needs it passed in exactly like `local` does, rather
     than reading the runner's own checkout root from its environment.
+
+    Public (not underscore-prefixed) because `linceo.cli.context` shares
+    it too — platform resolution has exactly one implementation, not one
+    per CLI command that happens to need it.
     """
     resolved = detect_platform(env) if platform is PlatformOption.AUTO else Platform(platform.value)
     if resolved is Platform.AZURE_DEVOPS:
@@ -290,7 +294,7 @@ def scan_secrets(
         workspace_path=workspace_path,
         now=now,
     )
-    context_provider = _resolve_context_provider(
+    context_provider = resolve_context_provider(
         platform=platform, workspace_path=workspace_path, env=env
     )
 
@@ -385,7 +389,7 @@ def scan_sca(
         workspace_path=workspace_path,
         now=now,
     )
-    context_provider = _resolve_context_provider(
+    context_provider = resolve_context_provider(
         platform=platform, workspace_path=workspace_path, env=env
     )
 

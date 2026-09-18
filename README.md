@@ -88,6 +88,60 @@ describe the same pinned reality (see `Dockerfile` and
 - **From inside it:** `linceo doctor` (see below) — the same command works
   identically for a `pip install`ed, bring-your-own-tool setup.
 
+#### Context providers inside the container: which environment variables cross the boundary
+
+`docker run` does not inherit the invoking process's environment — nothing
+reaches `linceo` inside the container unless passed explicitly with `-e
+VAR` (or `--env-file`). Which variables matter depends on `--platform` (or
+its `auto` detection, ADR §4 R1):
+
+- **`local`** (the default outside any recognized CI platform) needs
+  nothing extra: it resolves everything from the mounted git checkout
+  itself (`git rev-parse`, `git remote get-url origin`) — no environment
+  variable read at all.
+- **`azure_devops`** needs the Azure Pipelines agent's own variables
+  forwarded explicitly — all standard, non-secret predefined variables
+  (canonical list: `src/linceo/providers/azure_devops.py`, `ENV_VARS`,
+  plus the `auto`-detection sentinel below):
+
+  | Variable | Required? | Resolves |
+  |---|---|---|
+  | `TF_BUILD` | — | `auto` detection's own sentinel (`linceo.providers.detection`) |
+  | `BUILD_REPOSITORY_NAME` | required | `repository` |
+  | `BUILD_SOURCEVERSION` | required | `commit` |
+  | `BUILD_SOURCEBRANCH` | optional | `branch` (non-PR trigger) |
+  | `SYSTEM_PULLREQUEST_SOURCEBRANCH` | optional | `branch` (PR trigger) |
+  | `SYSTEM_PULLREQUEST_PULLREQUESTID` | optional | `pull_request_id` (Azure DevOps' own internal id) |
+  | `SYSTEM_PULLREQUEST_PULLREQUESTNUMBER` | optional | `pull_request_id` (GitHub-backed repository, human-facing number — preferred over the internal id when both are set) |
+  | `BUILD_BUILDID` | optional | `build_id` |
+  | `BUILD_REPOSITORY_URI` | optional | `source_url` |
+
+  ```bash
+  docker run --rm \
+    -e TF_BUILD -e BUILD_REPOSITORY_NAME -e BUILD_SOURCEVERSION \
+    -e BUILD_SOURCEBRANCH -e SYSTEM_PULLREQUEST_SOURCEBRANCH \
+    -e SYSTEM_PULLREQUEST_PULLREQUESTID -e SYSTEM_PULLREQUEST_PULLREQUESTNUMBER \
+    -e BUILD_BUILDID -e BUILD_REPOSITORY_URI \
+    -v "$PWD:/workspace" ghcr.io/jdiegoisaza/linceo scan secrets
+  ```
+
+  The reference `azure-pipelines/templates/linceo-scan.yml` already does
+  this by default (see `docs/ADOPTION.md`) — nothing to configure if you
+  use it. The snippet above only matters if you invoke the image directly,
+  outside that template.
+
+  **Deliberately an explicit allowlist, never the whole environment**: a
+  real Azure Pipelines job's process environment routinely carries far
+  more than this — feed credentials, mapped secret variables, other
+  steps' exports — none of which `linceo` has any business seeing inside
+  the container.
+
+  **Diagnosing this from inside a container**: `docker run --rm -e
+  TF_BUILD -e BUILD_REPOSITORY_NAME ... ghcr.io/jdiegoisaza/linceo
+  context` shows exactly which platform got selected, why, and the value
+  (or absence) of every variable above — run it before a real scan if
+  `auto` seems to be picking the wrong platform.
+
 ### `pip install` (local development, bring-your-own tool binaries)
 
 ```bash

@@ -8,6 +8,7 @@ the rule this module must satisfy.
 import typer
 
 from linceo import __version__
+from linceo.cli.context import context
 from linceo.cli.doctor import doctor
 from linceo.cli.scan import scan_app
 
@@ -26,6 +27,7 @@ app = typer.Typer(
 )
 app.add_typer(scan_app, name="scan")
 app.command("doctor")(doctor)
+app.command("context")(context)
 
 
 def _print_version_and_exit(*, show_version: bool) -> None:

@@ -14,19 +14,13 @@ from pathlib import Path
 import pytest
 
 from linceo.core.context import ContextResolutionError, Platform
-from linceo.providers.azure_devops import AzureDevOpsContextProvider
+from linceo.providers.azure_devops import ENV_VARS, AzureDevOpsContextProvider
 
-_ALL_KNOWN_VARS = (
-    "BUILD_REPOSITORY_NAME",
-    "BUILD_SOURCEVERSION",
-    "BUILD_SOURCEBRANCH",
-    "SYSTEM_PULLREQUEST_SOURCEBRANCH",
-    "SYSTEM_PULLREQUEST_PULLREQUESTID",
-    "SYSTEM_PULLREQUEST_PULLREQUESTNUMBER",
-    "BUILD_BUILDID",
-    "BUILD_REPOSITORY_URI",
-    "BUILD_SOURCESDIRECTORY",
-)
+#: Every variable `resolve()` actually reads (`ENV_VARS`, the same tuple
+#: `linceo context` and the azure-pipelines template use), plus one it
+#: deliberately does not: `BUILD_SOURCESDIRECTORY` — see
+#: `test_workspace_path_is_the_constructor_argument_not_build_sourcesdirectory`.
+_ALL_KNOWN_VARS = (*ENV_VARS, "BUILD_SOURCESDIRECTORY")
 
 
 @pytest.fixture(autouse=True)

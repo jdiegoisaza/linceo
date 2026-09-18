@@ -198,3 +198,46 @@ pasó), consultable desde un paso posterior en el mismo job:
 Esto es lo que permite, por ejemplo, decidir enviar una notificación distinta
 para un `3` (algo está roto) que para un `1` (hay hallazgos reales que
 revisar) — sin necesitar parsear el SARIF publicado solo para eso.
+
+## Cómo la plantilla resuelve el contexto de Azure Pipelines dentro del contenedor
+
+`docker run` no hereda el entorno del proceso que lo invoca — nada de lo que
+el agente de Azure Pipelines sabe (nombre del repositorio, commit, branch, id
+de pull request, id del build) llega al contenedor a menos que se pase de
+forma explícita. La plantilla (`azure-pipelines/templates/linceo-scan.yml`)
+ya hace esto por defecto, sin que quien la usa tenga que saberlo ni tocar
+nada: pasa `-e VAR` para cada variable que `linceo` necesita para que
+`--platform auto` (el default; la plantilla nunca lo cambia) resuelva
+`azure_devops` en vez de caer, en silencio, a `local`.
+
+**Por qué un listado explícito de variables y no heredar el entorno completo
+del agente.** El proceso de un job real de Azure Pipelines carga, en su
+propio entorno, bastante más que las variables `BUILD_*`/`SYSTEM_*` que
+`linceo` necesita: credenciales de feeds de paquetes, variables secretas
+mapeadas explícitamente al entorno, exports de pasos anteriores del mismo
+job. Nada de eso le sirve a `linceo`, y heredar el entorno completo del
+agente significaría meter todo eso dentro de un contenedor que corre una
+herramienta de seguridad — exactamente lo que ese paso no debería hacer. La
+plantilla pasa, por nombre, únicamente las variables que
+`linceo.providers.azure_devops.ENV_VARS` declara, más `TF_BUILD` (el
+sentinel que usa la detección `auto`) — listado canónico en
+`src/linceo/providers/azure_devops.py`; tabla completa de qué resuelve cada
+una en `README.md`, "Container image".
+
+**El bug real que motivó este arreglo, para que quede claro qué se estaba
+rompiendo:** sin este passthrough, `--platform auto` no encuentra `TF_BUILD`
+dentro del contenedor, cae a `local`, y la corrida "funciona" — pero contra
+el remote de git montado, no contra lo que el agente realmente sabe de ese
+run. `repository` sale de la URL del remote en vez de
+`BUILD_REPOSITORY_NAME`, y `build_id`/`pull_request_id` quedan
+silenciosamente ausentes del reporte. Nada falla ruidosamente — eso es
+precisamente lo que lo hace difícil de notar sin mirar con atención el
+encabezado `platform=...` del reporte de consola.
+
+**Diagnosticarlo sin correr un scan completo:** `linceo context` (dentro del
+contenedor, con las mismas variables que la plantilla ya pasa) muestra qué
+plataforma se seleccionó, por qué, y el valor — o ausencia — de cada
+variable relevante, antes de correr ninguna herramienta. Si alguna vez una
+organización invoca la imagen directamente en un paso propio, sin pasar por
+esta plantilla, `linceo context` es la forma más rápida de confirmar si el
+problema es exactamente este.

@@ -72,6 +72,33 @@ _ENV_BUILD_ID = "BUILD_BUILDID"
 #: reason as `_ENV_BUILD_ID`.
 _ENV_REPOSITORY_URI = "BUILD_REPOSITORY_URI"
 
+#: Every environment variable `resolve()` reads, gathered in one place —
+#: the exact allowlist a container invocation must forward
+#: (`docker run -e VAR ...`) for this provider to resolve anything at all
+#: once `--platform azure_devops` is selected, explicitly or via `auto`.
+#: `auto` detection itself needs one variable more, not read here since
+#: `resolve()` never runs detection:
+#: `linceo.providers.detection.AZURE_DEVOPS_SENTINEL_ENV_VAR`.
+#:
+#: This is deliberately an allowlist, not "forward the whole environment":
+#: a container invocation's process environment routinely carries far more
+#: than these — pipeline secrets mapped to variables, feed credentials,
+#: other steps' exports — none of which this provider has any business
+#: seeing. `linceo.cli.context` imports this tuple directly; the reference
+#: azure-pipelines template (a YAML/bash file, unable to import Python)
+#: hand-maintains its own copy of the same `-e VAR` list instead, kept
+#: honest by `tests/unit/test_cli_context.py`'s cross-check against it.
+ENV_VARS = (
+    _ENV_REPOSITORY,
+    _ENV_SOURCE_VERSION,
+    _ENV_SOURCE_BRANCH,
+    _ENV_PR_SOURCE_BRANCH,
+    _ENV_PR_ID,
+    _ENV_PR_NUMBER,
+    _ENV_BUILD_ID,
+    _ENV_REPOSITORY_URI,
+)
+
 #: Ref prefixes this module knows how to strip, longest/most specific first
 #: only matters in that none of these overlap — order is otherwise
 #: irrelevant. A ref that matches neither (e.g. `refs/pull/17/merge`, or

@@ -125,9 +125,39 @@ steps:
         LINCEO_ARGS+=(--fail-on "${FAIL_ON}")
       fi
 
-      echo "Running: docker run --rm -v ${SOURCES_DIR}:/workspace ${IMAGE} ${LINCEO_ARGS[*]}"
+      # `docker run` does not inherit the agent's own process environment —
+      # nothing crosses into the container unless named explicitly here.
+      # This is deliberately an allowlist of exactly the variables
+      # `linceo`'s `azure_devops` context provider reads (`auto`'s
+      # detection sentinel, `TF_BUILD`, plus everything
+      # `AzureDevOpsContextProvider.ENV_VARS` in
+      # src/linceo/providers/azure_devops.py names), never the whole
+      # environment: an Azure Pipelines job routinely carries far more
+      # than this — feed credentials, mapped secret variables, other
+      # steps' exports — none of which this container has any business
+      # seeing. Without this, `--platform auto` (this template never
+      # overrides it) silently falls back to `local`: the run still
+      # "succeeds", just against the wrong platform's context, with
+      # `build_id`/`pull_request_id` silently absent (see `docs/ADOPTION.md`,
+      # "Cómo esta plantilla resuelve el contexto de Azure Pipelines dentro
+      # del contenedor", and `linceo context` for diagnosing this from
+      # inside a container directly).
+      AZURE_DEVOPS_ENV_ARGS=(
+        -e TF_BUILD
+        -e BUILD_REPOSITORY_NAME
+        -e BUILD_SOURCEVERSION
+        -e BUILD_SOURCEBRANCH
+        -e SYSTEM_PULLREQUEST_SOURCEBRANCH
+        -e SYSTEM_PULLREQUEST_PULLREQUESTID
+        -e SYSTEM_PULLREQUEST_PULLREQUESTNUMBER
+        -e BUILD_BUILDID
+        -e BUILD_REPOSITORY_URI
+      )
+
+      echo "Running: docker run --rm ${AZURE_DEVOPS_ENV_ARGS[*]} -v ${SOURCES_DIR}:/workspace ${IMAGE} ${LINCEO_ARGS[*]}"
 
       docker run --rm \
+        "${AZURE_DEVOPS_ENV_ARGS[@]}" \
         -v "${SOURCES_DIR}:/workspace" \
         "${IMAGE}" \
         "${LINCEO_ARGS[@]}" \
