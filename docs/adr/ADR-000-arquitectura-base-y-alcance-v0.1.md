@@ -1181,7 +1181,9 @@ distinto.
 
 ### §8.3. Framework de CLI — Decidido: Typer
 
-**Elegido: Typer**, anclado `>=0.12,<1.0`. Motivo específico de este proyecto: `--fail-on`
+**Elegido: Typer**, anclado `>=0.12,<1.0` — rango original; ver la enmienda de
+2026-09-17 más abajo, que lo reemplaza por un pin exacto sobre `typer-slim` sin
+alterar el resto de esta decisión. Motivo específico de este proyecto: `--fail-on`
 y `--strict-normalization` validan contra la escala de severidad de §6, y Typer valida un
 argumento contra un `Enum` de Python de forma nativa. En argparse esa validación se
 escribe y se mantiene sincronizada a mano — exactamente la duplicación que desalinea el
@@ -1216,7 +1218,50 @@ Restricciones que acompañan la decisión:
    por Typer en ningún punto.
 3. Anclada por rango de versión mayor (`<1.0`) y auditada en el lockfile — una subida de
    versión mayor de Typer pasa por el mismo escrutinio que cualquier otro cambio
-   incompatible cubierto por semver en este documento.
+   incompatible cubierto por semver en este documento. Para `typer-slim`
+   específicamente, ese escrutinio ahora se aplica también a un salto de versión
+   *menor*: ver la enmienda inmediatamente abajo.
+
+#### Enmienda (2026-09-17): `typer-slim` invirtió su relación con `typer`; el pin pasa de rango a versión exacta
+
+La elección de Typer se implementa en `pyproject.toml` a través del paquete
+`typer-slim`, no `typer` directamente, precisamente para obtener la API de Typer sin
+arrastrar su árbol de dependencias completo. Hasta la versión `0.21.1`, esa
+distribución dependía únicamente de `click` y `typing-extensions` en su base —
+`rich` y `shellingham` quedaban detrás del extra `standard`, nunca instalados por
+defecto —, cumpliendo la superficie mínima que motiva esta sección. A partir de la
+versión `0.22.0`, `typer-slim` invirtió esa relación: su única dependencia base pasó
+a ser `typer>=0.22.0`, es decir, el paquete completo, que arrastra `rich`,
+`shellingham`, `pygments`, `markdown-it-py`, `mdurl` y `annotated-doc`. El rango
+original (`<1.0`) no excluía nada de esto, y así se publicó `v0.1.0` en PyPI: nueve
+paquetes instalados en el entorno base en vez de tres, contradiciendo directamente la
+restricción de superficie de dependencia que esta sección declara. **PyPI no permite
+republicar `v0.1.0`**; la corrección se distribuye como `v0.1.1`.
+
+El pin pasa de rango a versión exacta — `typer-slim==0.21.1`, la última versión cuya
+dependencia base, verificada contra `requires_dist` en el índice de PyPI, es
+exactamente `click>=8.0.0` + `typing-extensions>=3.7.4.3`, sin `typer` en ningún
+camino de resolución del entorno base. Un rango, aunque más estrecho que `<1.0`,
+seguiría dejando que un bump rutinario de dependencias cruzara ese límite de
+inversión sin que nadie lo decidiera explícitamente — exactamente lo que ya ocurrió
+una vez. Un pin exacto exige una edición deliberada y revisada de
+`pyproject.toml` para moverse, coherente con la restricción 3 de esta sección.
+
+El invariante es verificable, no solo documentado — mismo estándar de
+verificabilidad que §4 exige para las cinco restricciones: `tests/unit/test_dependency_surface.py`
+falla si `typer`, `rich`, `shellingham`, `pygments`, `markdown-it-py`, `mdurl` o
+`annotated-doc` aparecen en el cierre transitivo de las dependencias de *runtime* de
+`linceo` dentro de `uv.lock` (deliberadamente distinto de comprobar qué es importable
+en el entorno de desarrollo activo, donde herramientas como `pytest` traen su propio
+`pygments` sin que eso viole nada de lo declarado aquí).
+
+**Disparador para reconsiderar este pin exacto**: únicamente si una versión de
+`typer-slim` publicada después de `0.21.1` vuelve a declarar una dependencia base sin
+`typer` — verificado contra `requires_dist` en el índice de PyPI antes de mover el
+pin, nunca asumido por el número de versión —, o si el equipo decide explícitamente
+aceptar el árbol de dependencias completo de `typer` como parte de la superficie del
+paquete base, lo que exigiría revisar también la relación con R2 registrada arriba.
+Hasta entonces, `typer-slim` permanece anclado exactamente en `0.21.1`.
 
 ### Una categoría por invocación en v0.1, y por qué no contradice §1
 

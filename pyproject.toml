@@ -25,7 +25,12 @@ classifiers = [
   "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "typer-slim>=0.12,<1.0",
+    # Pinned exactly, not by range — see ADR §8.3's amendment. typer-slim
+    # 0.22.0 inverted its relationship with typer: instead of depending on
+    # click + typing-extensions, it now depends on typer itself, dragging
+    # in rich, shellingham, pygments, markdown-it-py, mdurl, and
+    # annotated-doc. 0.21.1 is the last release before that inversion.
+    "typer-slim==0.21.1",
 ]
 
 [project.urls]
