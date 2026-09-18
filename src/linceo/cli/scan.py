@@ -144,8 +144,13 @@ def detect_trivy(executor: ToolExecutor) -> tuple[str, tuple[DataSource, ...]]:
     return version, TrivyIntegration.detect_data_sources(executor)
 
 
-def _package_root() -> str:
-    """The installed `linceo` package's own directory (ADR §5/R5's "never inside this package")."""
+def package_root() -> str:
+    """The installed `linceo` package's own directory (ADR §5/R5's "never inside this package").
+
+    Public because `linceo.cli.baseline` needs the exact same value to
+    resolve its own destination policy file through `load_config` — same
+    reasoning as `resolve_context_provider` being public.
+    """
     return str(Path(__file__).resolve().parents[1])
 
 
@@ -184,7 +189,7 @@ def _load_resolved_config(
             env=env,
             explicit_config_path=str(config_path) if config_path is not None else None,
             workspace_path=workspace_path,
-            package_root=_package_root(),
+            package_root=package_root(),
             today=now.date(),
         )
     except ConfigurationError as exc:

@@ -13,13 +13,15 @@ from linceo.core.policy import (
     PolicyConfigurationError,
     ToolSkip,
     apply_exclusions,
+    baseline_wave_expiry,
     parse_policy_document,
+    render_exclusion_fragment,
     render_exclusions_toml,
     split_tool_skips,
     thresholds_from_fail_on,
     validate_thresholds,
 )
-from linceo.core.severity import Severity, SeveritySource
+from linceo.core.severity import SEVERITY_ORDER, Severity, SeveritySource
 
 TODAY = date(2026, 9, 13)
 _SECRET_HASH = "deadbeef"  # noqa: S105 -- test fixture value, not a credential
@@ -648,3 +650,135 @@ def test_render_exclusions_toml_renders_repositories_as_a_list() -> None:
     document = tomllib.loads(rendered)
 
     assert document["exclusions"][0]["repositories"] == ["orion-web", "orion-api"]
+
+
+# --- render_exclusion_fragment (ADR §8.2, `baseline init`'s merge path) ---------
+
+
+def test_render_exclusion_fragment_has_no_version_header() -> None:
+    exclusion = Exclusion(
+        fingerprint="v1:abc", reason="accepted risk", owner="alice", expires_at=TODAY
+    )
+
+    fragment = render_exclusion_fragment((exclusion,))
+
+    assert "version" not in fragment
+    assert fragment.startswith("[[exclusions]]")
+
+
+def test_render_exclusion_fragment_of_nothing_is_empty() -> None:
+    assert render_exclusion_fragment(()) == ""
+
+
+def test_render_exclusion_fragment_appended_to_an_existing_document_parses_as_one() -> None:
+    """The actual mechanism `linceo.cli.baseline` relies on: concatenating a fragment onto an
+    existing document's raw text, with nothing more than a blank-line join, produces one valid
+    document whose `exclusions` array holds both the old and the new entries."""
+    existing = (
+        "version = 1\n"
+        "\n"
+        "[thresholds]\n"
+        "high = 0\n"
+        "\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v1:old"\n'
+        'reason = "prior"\n'
+        'owner = "alice"\n'
+        "expires_at = 2026-12-01\n"
+    )
+    new_exclusion = Exclusion(
+        fingerprint="v1:new", reason="fresh", owner="bob", expires_at=TODAY + timedelta(days=30)
+    )
+
+    merged_text = existing.rstrip("\n") + "\n\n" + render_exclusion_fragment((new_exclusion,))
+    document = tomllib.loads(merged_text)
+    parsed = parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+    assert document["thresholds"] == {"high": 0}
+    assert {e.fingerprint for e in parsed.exclusions} == {"v1:old", "v1:new"}
+
+
+# --- baseline_wave_expiry (ADR §8.2, staggered by severity) ---------------------
+
+
+def test_baseline_wave_expiry_is_deterministic_for_the_same_finding() -> None:
+    """Same severity, same fingerprint, same today -> same date, every time (ADR R3)."""
+
+    def _compute() -> date:
+        return baseline_wave_expiry(
+            severity=Severity.HIGH,
+            fingerprint="v1:deadbeef",
+            today=TODAY,
+            min_expiry_days=30,
+            max_expiry_days=90,
+        )
+
+    assert _compute() == _compute()
+
+
+def test_baseline_wave_expiry_most_severe_expires_first() -> None:
+    """Every CRITICAL date must be strictly earlier than every INFO date, regardless of
+    which fingerprint lands where within its own band (no jitter-induced band overlap)."""
+    fingerprints = [f"v1:{i:064x}" for i in range(100)]
+
+    critical_dates = {
+        baseline_wave_expiry(
+            severity=Severity.CRITICAL,
+            fingerprint=fp,
+            today=TODAY,
+            min_expiry_days=30,
+            max_expiry_days=90,
+        )
+        for fp in fingerprints
+    }
+    info_dates = {
+        baseline_wave_expiry(
+            severity=Severity.INFO,
+            fingerprint=fp,
+            today=TODAY,
+            min_expiry_days=30,
+            max_expiry_days=90,
+        )
+        for fp in fingerprints
+    }
+
+    assert max(critical_dates) < min(info_dates)
+
+
+def test_baseline_wave_expiry_never_exceeds_the_max_expiry_days() -> None:
+    for severity in SEVERITY_ORDER:
+        for i in range(50):
+            expiry = baseline_wave_expiry(
+                severity=severity,
+                fingerprint=f"v1:{i:064x}",
+                today=TODAY,
+                min_expiry_days=30,
+                max_expiry_days=90,
+            )
+            assert expiry <= TODAY + timedelta(days=90)
+
+
+def test_baseline_wave_expiry_critical_never_precedes_min_expiry_days() -> None:
+    for i in range(50):
+        expiry = baseline_wave_expiry(
+            severity=Severity.CRITICAL,
+            fingerprint=f"v1:{i:064x}",
+            today=TODAY,
+            min_expiry_days=30,
+            max_expiry_days=90,
+        )
+        assert expiry >= TODAY + timedelta(days=30)
+
+
+def test_baseline_wave_expiry_with_a_tight_span_still_returns_a_valid_date() -> None:
+    """`min_expiry_days`/`max_expiry_days` close enough together that there is no room left
+    for jitter (`jitter_window` computes to 0) must not raise — just no sub-band spread."""
+    for severity in SEVERITY_ORDER:
+        expiry = baseline_wave_expiry(
+            severity=severity,
+            fingerprint="v1:abc",
+            today=TODAY,
+            min_expiry_days=30,
+            max_expiry_days=32,
+        )
+        assert TODAY + timedelta(days=30) <= expiry <= TODAY + timedelta(days=32)

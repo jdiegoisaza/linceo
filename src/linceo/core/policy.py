@@ -568,6 +568,71 @@ def parse_policy_document(
     return PolicyDocument(thresholds=thresholds, exclusions=exclusions, tool_skips=tool_skips)
 
 
+def baseline_wave_expiry(
+    *, severity: Severity, fingerprint: str, today: date, min_expiry_days: int, max_expiry_days: int
+) -> date:
+    """Compute a `baseline init`-generated entry's `expires_at`, staggered by severity (ADR §8.2).
+
+    A single shared `expires_at` across an entire mass-generated baseline
+    is exactly the failure mode ADR §8.2 warns against: every entry comes
+    due on the same day, the repository goes red all at once, and the
+    predictable response is to regenerate the whole baseline for another
+    `min_expiry_days` — the "eternal debt" the design explicitly exists to
+    avoid, just delayed rather than prevented. Two decisions fix this,
+    together:
+
+    1. **Primary axis: severity.** `Severity.CRITICAL` findings expire at
+       `min_expiry_days`; `Severity.INFO` findings expire at
+       `max_expiry_days` (the policy's own `max_expiry_horizon_days`, so
+       this can never itself be a validation error); the three severities
+       between are spaced evenly across that same range. The most
+       dangerous findings force a decision soonest, the least dangerous
+       get the longest runway — "para que lo más grave caduque primero".
+       A severity band's offset depends on nothing but that severity
+       itself, so it is identical across every run (ADR R3): the same
+       finding, scanned again unchanged, gets the same band every time.
+    2. **Secondary axis: a small deterministic jitter within each band**,
+       derived from `fingerprint` (never from list position or which
+       other findings happen to be present in this run — position is not
+       stable across runs, fingerprint content is) — otherwise a
+       repository whose findings cluster heavily in one severity (say,
+       sixty `MEDIUM`s) would still dump all sixty on one date, just a
+       different one than before. The jitter window is capped strictly
+       below one severity band's own width, so it can never push a more
+       severe band's latest date past a less severe band's earliest one
+       — "most severe expires first" holds for every pair of entries, not
+       just on average.
+
+    Every `Severity.CRITICAL` finding still shares `min_expiry_days`
+    itself as their earliest possible date — only entries *within* the
+    same severity spread out — so `--expires-in-days`'s meaning for the
+    most urgent band is unchanged from before this function existed.
+    """
+    band_index = SEVERITY_ORDER.index(severity)
+    band_count = len(SEVERITY_ORDER)
+    span = max(max_expiry_days - min_expiry_days, 0)
+
+    # Reserve the jitter window *before* spacing the bands, not after, so
+    # the least severe band's latest possible date still lands at or
+    # before `max_expiry_days` — spacing across the full span first and
+    # only then bolting on jitter would push it past the ceiling and need
+    # clamping back down to a single flat date, silently undoing the
+    # spread this function exists to produce. `SEVERITY_ORDER` (ADR §6)
+    # is fixed at five levels, so `band_count - 1` below is never zero.
+    jitter_window = min(6, span // band_count)
+    step = (span - jitter_window) // (band_count - 1)
+
+    band_offset = band_index * step
+    if jitter_window > 0:
+        fingerprint_hex = fingerprint.rpartition(":")[2]
+        jitter = int(fingerprint_hex, 16) % (jitter_window + 1)
+    else:
+        jitter = 0
+
+    expiry_days = min(min_expiry_days + band_offset + jitter, min_expiry_days + span)
+    return today + timedelta(days=expiry_days)
+
+
 #: TOML basic-string escapes for characters that may never appear literally
 #: inside a double-quoted string (TOML v1.0: quotation mark, backslash, and
 #: every control character other than tab/newline/etc., which get their own
@@ -604,35 +669,67 @@ def _toml_string(value: str) -> str:
     return f'"{"".join(chars)}"'
 
 
-def render_exclusions_toml(exclusions: Sequence[Exclusion]) -> str:
-    """Render `exclusions` as a complete `version = 1` policy document (ADR §8.2).
+def _render_exclusion_block(exclusion: Exclusion) -> str:
+    """Render one `[[exclusions]]` table — no `version` header, no trailing blank line."""
+    lines = ["[[exclusions]]"]
+    lines.append(f"fingerprint = {_toml_string(exclusion.fingerprint)}")
+    lines.append(f"reason = {_toml_string(exclusion.reason)}")
+    lines.append(f"owner = {_toml_string(exclusion.owner)}")
+    lines.append(f"expires_at = {exclusion.expires_at.isoformat()}")
+    if exclusion.repositories:
+        rendered = ", ".join(_toml_string(repo) for repo in exclusion.repositories)
+        lines.append(f"repositories = [{rendered}]")
+    if exclusion.category is not None:
+        lines.append(f"category = {_toml_string(exclusion.category.value)}")
+    if exclusion.rule_id is not None:
+        lines.append(f"rule_id = {_toml_string(exclusion.rule_id)}")
+    if exclusion.path is not None:
+        lines.append(f"path = {_toml_string(exclusion.path)}")
+    if exclusion.package is not None:
+        lines.append(f"package = {_toml_string(exclusion.package)}")
+    if exclusion.package_version is not None:
+        lines.append(f"package_version = {_toml_string(exclusion.package_version)}")
+    return "\n".join(lines)
 
-    `linceo baseline init`'s own output — the serialization counterpart to
-    `parse_policy_document`'s `[[exclusions]]` handling, for exactly the
-    same schema: every field this writes, that function can read back
-    (`tests/unit/test_policy.py` round-trips this). Writes only
-    `version` and `[[exclusions]]`; a `baseline init`-generated document
-    declares no `[thresholds]`/`[[skipped_tools]]` of its own.
+
+def render_exclusions_toml(exclusions: Sequence[Exclusion]) -> str:
+    """Render `exclusions` as a complete, standalone `version = 1` policy document (ADR §8.2).
+
+    `linceo baseline init`'s output for a destination that does not exist
+    yet — the serialization counterpart to `parse_policy_document`'s
+    `[[exclusions]]` handling, for exactly the same schema: every field
+    this writes, that function can read back
+    (`tests/unit/test_policy.py` round-trips this). Writes only `version`
+    and `[[exclusions]]`; a document generated this way declares no
+    `[thresholds]`/`[[skipped_tools]]` of its own.
+
+    For a destination that *does* already exist, see
+    `render_exclusion_fragment` instead — appending its output to the
+    existing file's own text, rather than replacing the file with this
+    function's output, is what keeps that file's `[thresholds]`,
+    `[tool_defaults]`/`[tools.<name>]`, other exclusions, and comments
+    intact (`linceo.cli.baseline` never calls this function once a
+    destination file exists).
     """
-    lines = ["version = 1", ""]
-    for exclusion in exclusions:
-        lines.append("[[exclusions]]")
-        lines.append(f"fingerprint = {_toml_string(exclusion.fingerprint)}")
-        lines.append(f"reason = {_toml_string(exclusion.reason)}")
-        lines.append(f"owner = {_toml_string(exclusion.owner)}")
-        lines.append(f"expires_at = {exclusion.expires_at.isoformat()}")
-        if exclusion.repositories:
-            rendered = ", ".join(_toml_string(repo) for repo in exclusion.repositories)
-            lines.append(f"repositories = [{rendered}]")
-        if exclusion.category is not None:
-            lines.append(f"category = {_toml_string(exclusion.category.value)}")
-        if exclusion.rule_id is not None:
-            lines.append(f"rule_id = {_toml_string(exclusion.rule_id)}")
-        if exclusion.path is not None:
-            lines.append(f"path = {_toml_string(exclusion.path)}")
-        if exclusion.package is not None:
-            lines.append(f"package = {_toml_string(exclusion.package)}")
-        if exclusion.package_version is not None:
-            lines.append(f"package_version = {_toml_string(exclusion.package_version)}")
-        lines.append("")
-    return "\n".join(lines).rstrip("\n") + "\n"
+    body = "\n\n".join(_render_exclusion_block(exclusion) for exclusion in exclusions)
+    return f"version = 1\n\n{body}\n" if body else "version = 1\n"
+
+
+def render_exclusion_fragment(exclusions: Sequence[Exclusion]) -> str:
+    """Render `exclusions` as `[[exclusions]]` blocks only, with no `version` header (ADR §8.2).
+
+    Meant to be appended to an *existing* policy document's own raw text
+    — never written as a standalone file, and never parsed back on its
+    own (it is not a complete document: `version` is missing on purpose).
+    TOML does not require an array-of-tables' entries to sit contiguously
+    with earlier ones of the same name, so appending this verbatim after
+    whatever the existing file already ends with is enough for the result
+    to parse as one document whose `exclusions` array holds both the old
+    entries and these new ones — nothing about the existing file's other
+    tables, scalar keys, or comments is read, reformatted, or touched.
+    Returns `""` (nothing to append) when `exclusions` is empty.
+    """
+    if not exclusions:
+        return ""
+    body = "\n\n".join(_render_exclusion_block(exclusion) for exclusion in exclusions)
+    return f"{body}\n"

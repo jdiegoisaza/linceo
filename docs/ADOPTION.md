@@ -42,31 +42,33 @@ observación reportó, y recién entonces cambiar `blocking: true` en la
 plantilla.
 
 `linceo baseline init` (ADR §8.2) hace exactamente esto: corre gitleaks y
-trivy de verdad sobre el estado actual del repositorio y escribe el
-fichero completo a partir de esa corrida — no requiere que exista una
-corrida de observación previa, ni copiar fingerprints a mano.
+trivy de verdad sobre el estado actual del repositorio, y **añade** una
+entrada nueva por cada hallazgo activo que todavía no esté cubierto por
+ninguna exclusión existente — no requiere que exista una corrida de
+observación previa, ni copiar fingerprints a mano, ni que el repositorio
+parta de cero.
 
 ```bash
 linceo baseline init --owner team-atlas
 ```
 
 ```
-Wrote 2 exclusion(s) to .devsecops/config.toml, all expiring 2026-10-18.
+Wrote 4 new exclusion(s) to .devsecops/config.toml (0 finding(s) already
+covered, left unchanged), expiring between 2026-10-22 and 2026-11-06,
+staggered by severity.
 ```
 
 `--owner` es obligatorio y deliberadamente nunca se infiere (nunca del
 usuario de git ni de variables del entorno) — declara explícitamente quién
 responde por este baseline, casi siempre un equipo, no una persona
-(`owner = "team-atlas"`, no `owner = "jperez"`). El fichero resultante:
+(`owner = "team-atlas"`, no `owner = "jperez"`). Cada entrada generada:
 
 ```toml
-version = 1
-
 [[exclusions]]
 fingerprint = "v1:7c2f9a10c4e0b8a1..."
 reason = "Initial adoption baseline — pending real triage"
 owner = "team-atlas"
-expires_at = 2026-10-18
+expires_at = 2026-10-22
 category = "secrets"
 rule_id = "generic-api-key"
 path = "src/config.py"
@@ -75,7 +77,7 @@ path = "src/config.py"
 fingerprint = "v1:e41b6d3c9f2a5d77..."
 reason = "Initial adoption baseline — pending real triage"
 owner = "team-atlas"
-expires_at = 2026-10-18
+expires_at = 2026-11-06
 category = "sca"
 rule_id = "CVE-2023-37920"
 path = "requirements.txt"
@@ -90,20 +92,56 @@ migrate` pueda reindexar cada entrada tras una subida de versión del
 algoritmo de huella o un cambio de `rule_id` en una herramienta, en vez de
 que la entrada quede huérfana e irrecuperable.
 
-**El vencimiento va corto a propósito — 30 días por defecto
-(`--expires-in-days` para cambiarlo), no los 90 que `max_expiry_horizon_days`
-permite como máximo.** El objetivo, declarado explícitamente en el ADR, es
-que el baseline "caduque por oleadas y fuerce un triaje real... en vez de
-congelar permanentemente el estado del repositorio". Un vencimiento largo
-logra exactamente lo que esta etapa existe para evitar — deuda que nunca se
-revisa.
+#### El vencimiento se escalona por severidad, nunca es una sola fecha
 
-**No sobrescribe un `.devsecops/config.toml` existente sin confirmación
-explícita** — pregunta interactivamente antes de reemplazarlo, o `--force`
-para saltarse la pregunta en un script. El fichero se genera completo a
-partir de esta corrida (nada de lo que hubiera antes en ese archivo se
-conserva); si ya existe contenido curado a mano que quieres preservar,
-revísalo antes de confirmar el reemplazo.
+Un baseline generado de una sola vez con **una única fecha de vencimiento**
+para las setenta y tantas entradas que una corrida real sobre un repositorio
+con historia puede producir tiene un defecto de diseño concreto: ese día, el
+repositorio entero vuelve a estar en rojo de golpe, y la reacción previsible
+del equipo — bajo presión, sin tiempo de triar setenta hallazgos en una
+sesión — es regenerar el baseline por otros 30 días. Eso no es lo que el ADR
+§8.2 pide ("caduque por oleadas y fuerce un triaje real"): es exactamente la
+deuda eterna que ese diseño existe para evitar, solo que pospuesta.
+
+`baseline init` reparte los vencimientos en dos ejes, deterministas los dos
+(ADR R3 — el mismo hallazgo, en cualquier corrida, cae en la misma fecha):
+
+1. **Eje principal: severidad.** Los hallazgos `CRITICAL` vencen primero, en
+   `--expires-in-days` (30 por defecto); los `INFO` vencen último, en el
+   `max_expiry_horizon_days` de la política (90 por defecto); `HIGH`,
+   `MEDIUM` y `LOW` quedan repartidos entre esos dos extremos. Lo más grave
+   fuerza una decisión primero — lo menos grave tiene más margen.
+2. **Eje secundario: un reparto pequeño y determinista dentro de cada
+   severidad**, derivado del propio `fingerprint` del hallazgo — nunca de
+   su posición en la lista ni de qué otros hallazgos haya en la misma
+   corrida, porque eso sí cambiaría entre corridas. Sin este segundo eje,
+   un repositorio cuyos hallazgos se concentran mucho en una sola severidad
+   (pongamos, sesenta `MEDIUM`) seguiría volcándolos todos en un único día
+   — solo que un día distinto al de antes.
+
+El resultado: `CRITICAL` sigue siendo lo primero en vencer y sigue siendo el
+valor que `--expires-in-days` controla directamente, pero ninguna severidad
+entera cae en un solo día, y una severidad nunca vence después que la
+siguiente más grave — eso se garantiza por construcción, no en promedio.
+
+**No sobrescribe un `.devsecops/config.toml` existente — nunca lo
+reemplaza, solo le añade entradas.** `[thresholds]`, `[tool_defaults]` /
+`[tools.<nombre>]`, las exclusiones ya existentes (vencidas o no) y
+cualquier comentario en el archivo sobreviven intactos: el comando lee el
+archivo, calcula qué hallazgos activos todavía no están cubiertos por
+ninguna exclusión, y añade solo eso. Si el destino ya existe y hay algo
+nuevo que añadir, pide confirmación explícita antes de tocarlo — nombrando
+qué hay ya (cuántas exclusiones, si hay gate configurado) y qué se va a
+añadir, nunca "Overwrite?" — o `--force` para saltarse la pregunta en un
+script. Si no hay nada nuevo que añadir (todo lo activo ya está cubierto),
+no toca el archivo en absoluto.
+
+**Una exclusión vencida no se renueva en silencio.** Si una entrada ya
+existente cubre un hallazgo pero su `expires_at` ya pasó, `baseline init`
+no genera una entrada nueva para el mismo hallazgo — eso reiniciaría el
+reloj exactamente sobre la señal que el ADR §8.2 diseñó para forzar una
+decisión real. La entrada vencida se deja tal cual, y el comando avisa
+cuántas hay para que alguien las revise directamente.
 
 **Si algún tool falla o su binario no está en `PATH`, el comando se niega a
 escribir nada** — un baseline generado a partir de evidencia incompleta
@@ -112,12 +150,11 @@ incompleto en la categoría que faltó, exactamente el "gate verde
 engañoso" que el ADR §5 existe para evitar. Corre `linceo doctor` primero
 si esto ocurre.
 
-Una vez generado, el fichero es exactamente el mismo `.devsecops/config.toml`
-que este documento describe en el resto de sus secciones: se puede editar a
-mano después (añadir una exclusión puntual nueva, ajustar un `reason`), y
-`linceo baseline init` puede volver a correrse más adelante — sobre el
-mismo repositorio, tras haber corregido lo que ya se trió — para generar un
-nuevo baseline de lo que siga activo.
+Por esto mismo, `linceo baseline init` puede correrse más de una vez sobre
+el mismo repositorio sin miedo — para el primer adoptante que arranca de
+cero, o más adelante para recoger hallazgos genuinamente nuevos aparecidos
+desde la última corrida — sin duplicar entradas ni perder nada de lo que
+ya había.
 
 **Lo que cambia de comportamiento en el momento del `blocking: true`:**
 cualquier hallazgo cubierto por una entrada `[[exclusions]]` vigente no

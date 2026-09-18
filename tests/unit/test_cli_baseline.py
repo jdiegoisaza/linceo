@@ -20,8 +20,14 @@ from typer.testing import CliRunner
 
 from linceo.cli.main import app
 from linceo.core.exit_codes import EXIT_CONFIGURATION_ERROR, EXIT_OK, EXIT_TOOL_EXECUTION_FAILED
-from linceo.core.policy import DEFAULT_BASELINE_EXPIRY_DAYS, parse_policy_document
+from linceo.core.policy import (
+    DEFAULT_BASELINE_EXPIRY_DAYS,
+    DEFAULT_MAX_HORIZON_DAYS,
+    baseline_wave_expiry,
+    parse_policy_document,
+)
 from linceo.core.ports import ProcessResult
+from linceo.core.severity import Severity
 from linceo.testing import FakeToolExecutor
 
 runner = CliRunner()
@@ -119,7 +125,7 @@ def test_writes_one_exclusion_per_active_finding_with_identity_fields(
     with output_path.open("rb") as f:
         document = tomllib.load(f)
     parsed = parse_policy_document(
-        document, today=_NOW.date(), max_horizon_days=DEFAULT_BASELINE_EXPIRY_DAYS + 1
+        document, today=_NOW.date(), max_horizon_days=DEFAULT_MAX_HORIZON_DAYS
     )
     assert len(parsed.exclusions) == 2
 
@@ -134,13 +140,31 @@ def test_writes_one_exclusion_per_active_finding_with_identity_fields(
     assert secrets_entry.package is None
     assert secrets_entry.owner == "team-atlas"
     assert secrets_entry.reason == "Initial adoption baseline — pending real triage"
-    assert secrets_entry.expires_at == _NOW.date() + timedelta(days=DEFAULT_BASELINE_EXPIRY_DAYS)
+    # Both fixtures resolve to Severity.HIGH (gitleaks has no native severity
+    # and falls to the `secrets` category default; trivy's fixture reports
+    # native "HIGH") — same wave, but the exact date is derived per-entry
+    # from its own fingerprint (`baseline_wave_expiry`), not asserted as a
+    # single flat value.
+    assert secrets_entry.expires_at == baseline_wave_expiry(
+        severity=Severity.HIGH,
+        fingerprint=secrets_entry.fingerprint,
+        today=_NOW.date(),
+        min_expiry_days=DEFAULT_BASELINE_EXPIRY_DAYS,
+        max_expiry_days=DEFAULT_MAX_HORIZON_DAYS,
+    )
 
     sca_entry = by_category["sca"]
     assert sca_entry.rule_id == "CVE-2023-37920"
     assert sca_entry.path == "requirements.txt"
     assert sca_entry.package == "certifi"
     assert sca_entry.package_version == "2015.4.28"
+    assert sca_entry.expires_at == baseline_wave_expiry(
+        severity=Severity.HIGH,
+        fingerprint=sca_entry.fingerprint,
+        today=_NOW.date(),
+        min_expiry_days=DEFAULT_BASELINE_EXPIRY_DAYS,
+        max_expiry_days=DEFAULT_MAX_HORIZON_DAYS,
+    )
 
 
 def test_clean_repository_writes_an_empty_baseline(
@@ -154,7 +178,7 @@ def test_clean_repository_writes_an_empty_baseline(
     result = runner.invoke(app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas"])
 
     assert result.exit_code == EXIT_OK
-    assert "Wrote 0 exclusion(s)" in result.output
+    assert "wrote an empty baseline" in result.output.lower()
     document = tomllib.loads((repo / ".devsecops" / "config.toml").read_text(encoding="utf-8"))
     assert document == {"version": 1}
 
@@ -188,7 +212,19 @@ def test_custom_reason_and_expiry_are_applied_to_every_entry(
     document = tomllib.loads((repo / ".devsecops" / "config.toml").read_text(encoding="utf-8"))
     parsed = parse_policy_document(document, today=_NOW.date(), max_horizon_days=90)
     assert {e.reason for e in parsed.exclusions} == {"Migrating from an older scanner"}
-    assert {e.expires_at for e in parsed.exclusions} == {_NOW.date() + timedelta(days=10)}
+    for exclusion in parsed.exclusions:
+        # Both fixtures resolve to Severity.HIGH — not the first (most
+        # urgent) band, so the custom `--expires-in-days 10` shows up as
+        # the *base* of the wave schedule, not a flat value every entry
+        # gets: each entry's actual date is later than day 10.
+        assert exclusion.expires_at > _NOW.date() + timedelta(days=10)
+        assert exclusion.expires_at == baseline_wave_expiry(
+            severity=Severity.HIGH,
+            fingerprint=exclusion.fingerprint,
+            today=_NOW.date(),
+            min_expiry_days=10,
+            max_expiry_days=90,
+        )
 
 
 def test_custom_output_path_via_config_flag(
@@ -219,15 +255,17 @@ def test_custom_output_path_via_config_flag(
     assert not (repo / ".devsecops").exists()
 
 
-def test_declining_the_overwrite_prompt_aborts_without_writing(
+def test_declining_the_confirmation_aborts_without_writing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "widgets")
     output_path = repo / ".devsecops" / "config.toml"
     output_path.parent.mkdir(parents=True)
-    output_path.write_text("version = 1\n", encoding="utf-8")
+    existing_content = "version = 1\n\n[thresholds]\nhigh = 0\n"
+    output_path.write_text(existing_content, encoding="utf-8")
     _patch_executor(
-        monkeypatch, _findings_recordings(gitleaks_fixture="empty.json", trivy_fixture="empty.json")
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
     )
 
     result = runner.invoke(
@@ -236,10 +274,75 @@ def test_declining_the_overwrite_prompt_aborts_without_writing(
 
     assert result.exit_code == EXIT_CONFIGURATION_ERROR
     assert "Aborted" in result.output
-    assert output_path.read_text(encoding="utf-8") == "version = 1\n"
+    assert output_path.read_text(encoding="utf-8") == existing_content
 
 
-def test_accepting_the_overwrite_prompt_writes(
+def test_confirmation_names_what_already_exists_and_what_will_be_added(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prompt describes an additive merge, never an "overwrite" — nothing existing is at
+    risk, so the message must not read as if it were (the bug this behavior replaces)."""
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text("version = 1\n\n[thresholds]\nhigh = 0\n", encoding="utf-8")
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(
+        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas"], input="n\n"
+    )
+
+    assert "already exists" in result.output
+    assert "gate: configured" in result.output
+    assert "ADD 1 new exclusion" in result.output
+    assert "Nothing existing is modified or removed" in result.output
+    assert "Overwrite" not in result.output
+
+
+def test_accepting_the_confirmation_appends_and_preserves_everything_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression this whole rewrite exists to fix: an existing [thresholds] gate and a
+    prior exclusion must both survive a baseline init run untouched."""
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text(
+        "version = 1\n"
+        "\n"
+        "[thresholds]\n"
+        "critical = 0\n"
+        "high = 0\n"
+        "\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v1:preexisting0000000000000000000000000000000000000000000000000000"\n'
+        'reason = "Pre-existing, hand-curated exclusion"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n",
+        encoding="utf-8",
+    )
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(
+        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas"], input="y\n"
+    )
+
+    assert result.exit_code == EXIT_OK, result.output
+    document = tomllib.loads(output_path.read_text(encoding="utf-8"))
+    assert document["thresholds"] == {"critical": 0, "high": 0}
+    assert len(document["exclusions"]) == 2
+    reasons = {e["reason"] for e in document["exclusions"]}
+    assert "Pre-existing, hand-curated exclusion" in reasons
+    assert "Initial adoption baseline — pending real triage" in reasons
+
+
+def test_force_skips_the_confirmation_prompt_entirely(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "widgets")
@@ -252,31 +355,13 @@ def test_accepting_the_overwrite_prompt_writes(
     )
 
     result = runner.invoke(
-        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas"], input="y\n"
-    )
-
-    assert result.exit_code == EXIT_OK
-    document = tomllib.loads(output_path.read_text(encoding="utf-8"))
-    assert len(document["exclusions"]) == 1
-
-
-def test_force_skips_the_confirmation_prompt_entirely(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = _init_repo(tmp_path / "widgets")
-    output_path = repo / ".devsecops" / "config.toml"
-    output_path.parent.mkdir(parents=True)
-    output_path.write_text("version = 1\n", encoding="utf-8")
-    _patch_executor(
-        monkeypatch, _findings_recordings(gitleaks_fixture="empty.json", trivy_fixture="empty.json")
-    )
-
-    result = runner.invoke(
         app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas", "--force"]
     )
 
     assert result.exit_code == EXIT_OK
     assert "?" not in result.output  # no prompt was ever printed
+    document = tomllib.loads(output_path.read_text(encoding="utf-8"))
+    assert len(document["exclusions"]) == 1
 
 
 def test_missing_gitleaks_binary_refuses_to_write_a_baseline(
@@ -315,6 +400,203 @@ def test_a_path_that_is_not_a_git_repository_is_a_configuration_error(tmp_path: 
 
     assert result.exit_code == EXIT_CONFIGURATION_ERROR
     assert "Configuration error" in result.output
+
+
+def test_rerunning_with_unchanged_findings_adds_nothing_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+    first = runner.invoke(
+        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas", "--force"]
+    )
+    assert first.exit_code == EXIT_OK, first.output
+    output_path = repo / ".devsecops" / "config.toml"
+    written_after_first = output_path.read_text(encoding="utf-8")
+
+    second = runner.invoke(
+        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas", "--force"]
+    )
+
+    assert second.exit_code == EXIT_OK, second.output
+    assert "Nothing to add" in second.output
+    assert output_path.read_text(encoding="utf-8") == written_after_first
+
+
+def test_an_expired_existing_exclusion_is_not_silently_renewed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lapsed exclusion is ADR §8.2's own signal that a real decision is overdue — baseline
+    init must leave it exactly as it is, not quietly generate a fresh replacement entry."""
+    repo = _init_repo(tmp_path / "widgets")
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+    first = runner.invoke(
+        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas", "--force"]
+    )
+    assert first.exit_code == EXIT_OK, first.output
+    output_path = repo / ".devsecops" / "config.toml"
+    document = tomllib.loads(output_path.read_text(encoding="utf-8"))
+    assert len(document["exclusions"]) == 1
+
+    # Force that one entry into the past, as if it had lapsed long ago.
+    expired_text = output_path.read_text(encoding="utf-8").replace(
+        f"expires_at = {document['exclusions'][0]['expires_at'].isoformat()}",
+        "expires_at = 2020-01-01",
+    )
+    output_path.write_text(expired_text, encoding="utf-8")
+
+    second = runner.invoke(
+        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas", "--force"]
+    )
+
+    assert second.exit_code == EXIT_OK, second.output
+    assert "Nothing to add" in second.output
+    final_document = tomllib.loads(output_path.read_text(encoding="utf-8"))
+    assert len(final_document["exclusions"]) == 1
+    assert final_document["exclusions"][0]["expires_at"].isoformat() == "2020-01-01"
+
+
+def test_an_existing_file_that_is_not_valid_toml_is_refused_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text("this is not [valid toml", encoding="utf-8")
+    _patch_executor(
+        monkeypatch, _findings_recordings(gitleaks_fixture="empty.json", trivy_fixture="empty.json")
+    )
+
+    result = runner.invoke(app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas"])
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "not a valid policy document" in result.output
+    assert output_path.read_text(encoding="utf-8") == "this is not [valid toml"
+
+
+def test_confirmation_mentions_existing_tool_skips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text(
+        "version = 1\n"
+        "\n"
+        "[[skipped_tools]]\n"
+        'tool = "trivy"\n'
+        'reason = "rollout paused"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n",
+        encoding="utf-8",
+    )
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(
+        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas"], input="n\n"
+    )
+
+    assert "1 tool skip(s)" in result.output
+
+
+def test_a_merged_document_that_would_be_invalid_is_never_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The safety net around the final write: even if the merge ever produced something
+    invalid, nothing reaches `output_path` — proven by forcing exactly that."""
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text("version = 1\n", encoding="utf-8")
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+    monkeypatch.setattr("linceo.cli.baseline.render_exclusion_fragment", lambda _: "not [valid\n")
+
+    result = runner.invoke(
+        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas", "--force"]
+    )
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "Refusing to write" in result.output
+    assert output_path.read_text(encoding="utf-8") == "version = 1\n"
+    assert not output_path.with_name("config.toml.tmp").exists()
+
+
+def test_expired_existing_exclusions_are_noted_when_new_entries_are_also_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuinely new (secrets) finding still gets written even while a *different*,
+    already-tracked (sca) finding's exclusion has separately expired — the note about the
+    latter is informational, never blocking the former."""
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    # Exact fingerprint the `trivy/one_finding.json` fixture's CVE-2023-37920 (certifi
+    # 2015.4.28, requirements.txt) resolves to — already tracked here, but expired.
+    trivy_fingerprint = "v1:6fbe3a464caf3164645c917307ea984fcd586ce61b6e1b4da7dbf0b90af8cae4"
+    output_path.write_text(
+        "version = 1\n"
+        "\n"
+        "[[exclusions]]\n"
+        f'fingerprint = "{trivy_fingerprint}"\n'
+        'reason = "old"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2020-01-01\n",
+        encoding="utf-8",
+    )
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="one_finding.json"),
+    )
+
+    result = runner.invoke(
+        app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas", "--force"]
+    )
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "Wrote 1 new exclusion(s)" in result.output
+    assert "1 existing exclusion(s)" in result.output
+    assert "have expired" in result.output
+    document = tomllib.loads(output_path.read_text(encoding="utf-8"))
+    assert len(document["exclusions"]) == 2
+
+
+def test_expires_in_days_at_or_beyond_the_horizon_is_a_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    _patch_executor(
+        monkeypatch, _findings_recordings(gitleaks_fixture="empty.json", trivy_fixture="empty.json")
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "baseline",
+            "init",
+            "--path",
+            str(repo),
+            "--owner",
+            "team-atlas",
+            "--expires-in-days",
+            "90",
+        ],
+    )
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "leaves no room to stagger" in result.output
+    assert not (repo / ".devsecops").exists()
 
 
 def test_baseline_init_is_listed_in_help() -> None:

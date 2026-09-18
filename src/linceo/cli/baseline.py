@@ -1,26 +1,29 @@
 """``linceo baseline init``: generate a fresh exclusions baseline from a real run (ADR §8.2).
 
-Turns every active finding a real run over the current workspace produces
-into a `[[exclusions]]` entry, with a shared adoption `reason`, the
-operator-declared `owner`, and an `expires_at` deliberately shorter than
-the general 90-day maximum (`DEFAULT_BASELINE_EXPIRY_DAYS`, 30 days) — the
-whole point of a mass-generated baseline is that it "caduque por oleadas y
-fuerce un triaje real", not freeze the repository's current state
-permanently (ADR §8.2).
+Turns every currently active finding *not already tracked by an existing
+exclusion* into a new `[[exclusions]]` entry, with a shared adoption
+`reason`, the operator-declared `owner`, and an `expires_at` staggered by
+severity (`linceo.core.policy.baseline_wave_expiry`) so a mass-generated
+baseline does not all come due on the same day (ADR §8.2).
 
-Runs with a bare `Config()` on purpose — no pre-existing exclusions,
-thresholds, or tool skips applied, and no `--config`/`[tools.<name>]`
-per-tool tuning picked up either: `baseline init` exists to answer "what
-does this repository actually look like right now", not a view already
-filtered by whatever policy happens to sit at the destination it is about
-to (over)write.
+Loads whatever policy document already sits at the destination — through
+the same `load_config` every other command uses — and scans *with* it:
+`[tool_defaults]`/`[tools.<name>]` apply exactly as they would to a real
+`scan <category>`, and a finding an existing exclusion already covers
+(even one that has since expired — see `_already_tracked_fingerprints`)
+never gets a second, duplicate entry. When that destination already has
+content, this command never replaces it: the new entries are appended to
+its own raw text, so `[thresholds]`, tool configuration, prior
+exclusions, and any comments survive untouched (`render_exclusion_fragment`,
+`linceo.core.policy`) — there is no code path in this module that writes
+over an existing file's bytes.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import typer
@@ -32,16 +35,24 @@ from linceo.cli.scan import (
     PlatformOption,
     detect_gitleaks_version,
     detect_trivy,
+    package_root,
     resolve_context_provider,
 )
-from linceo.core.config import Config, candidate_config_paths
+from linceo.core.config import Config, ConfigurationError, candidate_config_paths, load_config
 from linceo.core.context import ContextResolutionError
 from linceo.core.engine import run
 from linceo.core.execution import ExecutionStatus
 from linceo.core.exit_codes import EXIT_CONFIGURATION_ERROR, EXIT_OK, EXIT_TOOL_EXECUTION_FAILED
 from linceo.core.findings import Category, Finding
 from linceo.core.normalization import SeverityNormalizer
-from linceo.core.policy import DEFAULT_BASELINE_EXPIRY_DAYS, Exclusion, render_exclusions_toml
+from linceo.core.policy import (
+    DEFAULT_BASELINE_EXPIRY_DAYS,
+    Exclusion,
+    apply_exclusions,
+    baseline_wave_expiry,
+    render_exclusion_fragment,
+    render_exclusions_toml,
+)
 from linceo.core.ports import ContextProvider, ToolExecutor
 from linceo.core.results import RunResult, RunStatus
 from linceo.providers.environment import process_environment
@@ -55,22 +66,65 @@ baseline_app = typer.Typer(help="Generate and maintain the exclusions baseline (
 #: unusable in practice, a concession the ADR makes explicitly.
 DEFAULT_REASON = "Initial adoption baseline — pending real triage"
 
+#: Earlier than any real policy document's `expires_at` could legitimately
+#: be — used only as `apply_exclusions`'s `today` in
+#: `_already_tracked_fingerprints`, so that no exclusion can ever register
+#: as expired relative to it (`apply_exclusions` treats `expires_at <
+#: today` as expired; nothing is ever earlier than `date.min`). That is
+#: the point: this asks "does *any* exclusion reference this finding",
+#: deliberately blind to whether that exclusion has, for real, lapsed.
+_ALWAYS_COVERED = date.min
+
 
 @dataclass(frozen=True, slots=True)
 class BaselineResult:
-    """What one `gather_baseline` call produced: the run itself, and the entries built from it."""
+    """What one `gather_baseline` call produced."""
 
     run_result: RunResult
-    exclusions: tuple[Exclusion, ...]
+    new_exclusions: tuple[Exclusion, ...]
+    already_tracked_count: int
 
 
-def _build_exclusion(finding: Finding, *, reason: str, owner: str, expires_at: date) -> Exclusion:
-    """Turn one active `Finding` into a baseline `Exclusion`.
+def _already_tracked_fingerprints(
+    findings: tuple[Finding, ...], exclusions: tuple[Exclusion, ...], *, repository: str
+) -> set[str]:
+    """Fingerprints of `findings` referenced by *any* existing exclusion, expired or not.
+
+    Reuses `apply_exclusions`'s own fingerprint-prefix matching (ADR §7's
+    `FP` column) rather than a second implementation of it here, by
+    passing a `today` far enough in the future that no real exclusion
+    could ever register as expired against it. That is deliberate, not a
+    workaround: an exclusion that has genuinely expired is ADR §8.2's own
+    signal that a real decision is overdue on that finding — `baseline
+    init` must not quietly reset that clock by generating a fresh
+    "new" entry for the same finding just because the old one lapsed.
+    """
+    outcome = apply_exclusions(findings, exclusions, today=_ALWAYS_COVERED, repository=repository)
+    return {finding.fingerprint for finding in outcome.suppressed}
+
+
+def _build_exclusion(
+    finding: Finding,
+    *,
+    reason: str,
+    owner: str,
+    today: date,
+    min_expiry_days: int,
+    max_expiry_days: int,
+) -> Exclusion:
+    """Turn one newly-tracked `Finding` into a baseline `Exclusion`.
 
     Carries its readable identity fields alongside the fingerprint (ADR
     §8.2) so a future `baseline migrate` can reindex it after a fingerprint
     algorithm bump or a tool renaming a rule.
     """
+    expires_at = baseline_wave_expiry(
+        severity=finding.severity,
+        fingerprint=finding.fingerprint,
+        today=today,
+        min_expiry_days=min_expiry_days,
+        max_expiry_days=max_expiry_days,
+    )
     return Exclusion(
         fingerprint=finding.fingerprint,
         reason=reason,
@@ -88,25 +142,35 @@ def gather_baseline(
     *,
     context_provider: ContextProvider,
     executor: ToolExecutor,
+    resolved_config: Config,
     now: datetime,
     reason: str,
     owner: str,
-    expiry_days: int,
+    min_expiry_days: int,
 ) -> BaselineResult:
-    """Run both reference integrations fresh and build one `Exclusion` per active finding.
+    """Run both reference integrations fresh, under `resolved_config`, and build new entries.
 
     Reachable from plain Python, with no Typer involved (AGENTS.md, "CLI
     framework"): `init()` below only translates flags into this call and
-    renders/writes its result. Both categories run in a single `engine.run`
-    call — `run` already accepts `integrations` as a category-keyed mapping
-    of any size; `scan <category>`'s "one category per invocation" is a CLI
-    surface constraint (ADR §8.3), not a limitation of `run` itself, and
-    `baseline init` genuinely needs "el fichero completo" (ADR §8.2) in one
-    real run, not two independently-triggered ones a caller would have to
-    reconcile by hand. One combined `SeverityNormalizer` covers both tools
-    correctly because `native_map` is keyed by `(tool, raw_severity)` —
-    gitleaks contributes no native map at all (it reports no native
-    severity, ADR §6), so merging in trivy's changes nothing for it.
+    handles the merge/write/confirmation around it. Both categories run in
+    a single `engine.run` call — `run` already accepts `integrations` as a
+    category-keyed mapping of any size; `scan <category>`'s "one category
+    per invocation" is a CLI surface constraint (ADR §8.3), not a
+    limitation of `run` itself, and `baseline init` genuinely needs "el
+    fichero completo" (ADR §8.2) from one real run, not two independently
+    triggered ones a caller would have to reconcile by hand. One combined
+    `SeverityNormalizer` covers both tools correctly because `native_map`
+    is keyed by `(tool, raw_severity)` — gitleaks contributes no native map
+    at all (it reports no native severity, ADR §6), so merging in trivy's
+    changes nothing for it.
+
+    Running `resolved_config` as-is (rather than a bare `Config()`) means
+    `[tool_defaults]`/`[tools.<name>]` apply exactly as they would to a
+    real `scan <category>` against the same workspace, and an active
+    `ToolSkip` in it is honored the same way too — this is meant to answer
+    "what would a baseline generated *right now, under the policy already
+    in force* need to cover", not a view of the repository with all
+    tuning switched off.
     """
     gitleaks_version = detect_gitleaks_version(executor)
     trivy_version, db_data_sources = detect_trivy(executor)
@@ -120,20 +184,29 @@ def gather_baseline(
         },
         executor=executor,
         normalizer=SeverityNormalizer(native_map=TRIVY_NATIVE_SEVERITY_MAP),
-        config=Config(),
+        config=resolved_config,
         now=now,
     )
 
-    expires_at = now.date() + timedelta(days=expiry_days)
-    # No suppressed-findings filtering here: `Config()` carries no
-    # exclusions, so `result.findings` (already deduplicated) already *is*
-    # the complete active set — nothing in this run could have suppressed
-    # anything.
-    exclusions = tuple(
-        _build_exclusion(finding, reason=reason, owner=owner, expires_at=expires_at)
-        for finding in result.findings
+    tracked = _already_tracked_fingerprints(
+        result.findings, resolved_config.policy.exclusions, repository=result.context.repository
     )
-    return BaselineResult(run_result=result, exclusions=exclusions)
+    today = now.date()
+    new_exclusions = tuple(
+        _build_exclusion(
+            finding,
+            reason=reason,
+            owner=owner,
+            today=today,
+            min_expiry_days=min_expiry_days,
+            max_expiry_days=resolved_config.max_expiry_horizon_days,
+        )
+        for finding in result.findings
+        if finding.fingerprint not in tracked
+    )
+    return BaselineResult(
+        run_result=result, new_exclusions=new_exclusions, already_tracked_count=len(tracked)
+    )
 
 
 def _incomplete_executions_summary(result: RunResult) -> str:
@@ -144,6 +217,32 @@ def _incomplete_executions_summary(result: RunResult) -> str:
         for execution in result.executions
         if execution.status in (ExecutionStatus.FAILED, ExecutionStatus.SKIPPED)
     ]
+    return "\n".join(lines)
+
+
+def _render_merge_preview(
+    output_path: Path, resolved_config: Config, *, new_count: int, already_tracked_count: int
+) -> str:
+    """Describe exactly what `init()` is about to do to an *existing* `output_path`.
+
+    Named "merge", never "overwrite": this command only ever appends new
+    `[[exclusions]]` entries to what is already there (ADR §8.2's own
+    generation mechanism, not a replacement of the document it lives in).
+    """
+    lines = [f"{output_path} already exists:"]
+    lines.append(f"  - {len(resolved_config.policy.exclusions)} existing exclusion(s)")
+    lines.append(
+        "  - gate: configured ([thresholds])"
+        if resolved_config.threshold_resolution.thresholds
+        else "  - gate: not configured"
+    )
+    if resolved_config.policy.tool_skips:
+        lines.append(f"  - {len(resolved_config.policy.tool_skips)} tool skip(s)")
+    lines.append("")
+    lines.append(
+        f"This will ADD {new_count} new exclusion(s) for active finding(s) not yet covered "
+        f"({already_tracked_count} already are). Nothing existing is modified or removed."
+    )
     return "\n".join(lines)
 
 
@@ -161,8 +260,10 @@ def init(
         None,
         "--config",
         help=(
-            "Where to write the baseline. Defaults to the conventional .devsecops/config.toml "
-            "inside --path (ADR §5/R5) — the same file `scan <category> --config` would read."
+            "Where to read/write the baseline. Defaults to the conventional "
+            ".devsecops/config.toml inside --path (ADR §5/R5) — the same file "
+            "`scan <category> --config` would read. Existing content is never replaced, "
+            "only added to."
         ),
     ),
     owner: str = typer.Option(
@@ -185,17 +286,20 @@ def init(
         DEFAULT_BASELINE_EXPIRY_DAYS,
         "--expires-in-days",
         help=(
-            "Days until every generated entry expires (ADR §8.2: short, to force "
-            "real triage in waves)."
+            "Days until the most urgent wave (CRITICAL findings) expires; less severe "
+            "findings get progressively longer windows up to the policy's own "
+            "max_expiry_horizon_days, staggered so a mass baseline doesn't all come due "
+            "on the same day (ADR §8.2)."
         ),
     ),
     force: bool = typer.Option(
-        False, "--force", help="Overwrite an existing file at the destination without asking."
+        False, "--force", help="Skip the confirmation before adding entries to an existing file."
     ),
 ) -> None:
     """Generate a fresh exclusions baseline from a real run over the current workspace."""
     workspace_path = str(path.resolve())
     now = datetime.now(UTC)
+    today = now.date()
     env = process_environment()
 
     output_path = Path(
@@ -205,11 +309,30 @@ def init(
         )[0]
     )
 
-    if output_path.exists() and not force:
-        overwrite = typer.confirm(f"{output_path} already exists. Overwrite it?", default=False)
-        if not overwrite:
-            typer.echo("Aborted: nothing written.", err=True)
-            raise typer.Exit(code=EXIT_CONFIGURATION_ERROR)
+    try:
+        resolved_config = load_config(
+            explicit_config_path=str(output_path),
+            workspace_path=workspace_path,
+            package_root=package_root(),
+            today=today,
+        )
+    except ConfigurationError as exc:
+        typer.echo(
+            f"Configuration error: {output_path} already exists but is not a valid policy "
+            f"document — refusing to touch it: {exc}",
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
+
+    if expires_in_days >= resolved_config.max_expiry_horizon_days:
+        typer.echo(
+            f"Configuration error: --expires-in-days {expires_in_days} leaves no room to "
+            f"stagger within this policy's max_expiry_horizon_days "
+            f"({resolved_config.max_expiry_horizon_days}) — lower --expires-in-days, or raise "
+            "max_expiry_horizon_days in the policy file.",
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_CONFIGURATION_ERROR)
 
     try:
         context_provider = resolve_context_provider(
@@ -218,10 +341,11 @@ def init(
         baseline = gather_baseline(
             context_provider=context_provider,
             executor=SubprocessToolExecutor(),
+            resolved_config=resolved_config,
             now=now,
             reason=reason,
             owner=owner,
-            expiry_days=expires_in_days,
+            min_expiry_days=expires_in_days,
         )
     except ContextResolutionError as exc:
         typer.echo(f"Configuration error: {exc}", err=True)
@@ -237,14 +361,85 @@ def init(
         )
         raise typer.Exit(code=EXIT_TOOL_EXECUTION_FAILED)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(render_exclusions_toml(baseline.exclusions), encoding="utf-8")
+    file_exists = output_path.exists()
 
-    expires_at = now.date() + timedelta(days=expires_in_days)
+    if file_exists and not baseline.new_exclusions:
+        # Nothing changes for an *existing* destination: every active
+        # finding is already tracked, so there is nothing to append and no
+        # reason to touch the file at all. A brand new destination still
+        # gets written below even with zero findings (an empty, valid
+        # `version = 1` document) — establishing the conventional file is
+        # useful on its own, unlike a no-op rewrite of one that already
+        # exists.
+        typer.echo(
+            f"Nothing to add: all {baseline.already_tracked_count} active finding(s) are "
+            f"already covered by an existing exclusion in {output_path}."
+        )
+        raise typer.Exit(code=EXIT_OK)
+
+    fragment = render_exclusion_fragment(baseline.new_exclusions)
+
+    if file_exists:
+        if not force:
+            typer.echo(
+                _render_merge_preview(
+                    output_path,
+                    resolved_config,
+                    new_count=len(baseline.new_exclusions),
+                    already_tracked_count=baseline.already_tracked_count,
+                )
+            )
+            proceed = typer.confirm("Add these to the existing file?", default=False)
+            if not proceed:
+                typer.echo("Aborted: nothing written.", err=True)
+                raise typer.Exit(code=EXIT_CONFIGURATION_ERROR)
+        existing_text = output_path.read_text(encoding="utf-8")
+        merged_text = existing_text.rstrip("\n") + "\n\n" + fragment
+    else:
+        merged_text = render_exclusions_toml(baseline.new_exclusions)
+
+    # Verify the merged document is itself still valid — the exact same
+    # `load_config` any other command would use to read it back, e.g. to
+    # confirm these new entries' `expires_at` really do stay within this
+    # policy's own `max_expiry_horizon_days` — rather than assuming the
+    # arithmetic above got it right, or that concatenating text can't ever
+    # produce something `[[exclusions]]`-shaped but otherwise broken.
+    # Written to a temp file first and only ever moved into place with an
+    # atomic rename: a failed validation, or a crash between the write and
+    # the rename, never leaves `output_path` partially written.
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(output_path.name + ".tmp")
+    temp_path.write_text(merged_text, encoding="utf-8")
+    try:
+        load_config(
+            explicit_config_path=str(temp_path),
+            workspace_path=workspace_path,
+            package_root=package_root(),
+            today=today,
+        )
+    except ConfigurationError as exc:
+        temp_path.unlink()
+        typer.echo(f"Refusing to write: the merged document would be invalid: {exc}", err=True)
+        raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
+    temp_path.replace(output_path)
+
+    if not baseline.new_exclusions:
+        typer.echo(f"No active findings — wrote an empty baseline to {output_path}.")
+        raise typer.Exit(code=EXIT_OK)
+
+    expiry_dates = sorted(exclusion.expires_at for exclusion in baseline.new_exclusions)
     typer.echo(
-        f"Wrote {len(baseline.exclusions)} exclusion(s) to {output_path}, "
-        f"all expiring {expires_at.isoformat()}."
+        f"Wrote {len(baseline.new_exclusions)} new exclusion(s) to {output_path} "
+        f"({baseline.already_tracked_count} finding(s) already covered, left unchanged), "
+        f"expiring between {expiry_dates[0].isoformat()} and {expiry_dates[-1].isoformat()}, "
+        "staggered by severity."
     )
+    if baseline.run_result.expired_exclusions:
+        typer.echo(
+            f"Note: {len(baseline.run_result.expired_exclusions)} existing exclusion(s) in "
+            f"{output_path} have expired and their finding(s) are active again — left as-is; "
+            "review them directly rather than relying on this command to renew them."
+        )
     raise typer.Exit(code=EXIT_OK)
 
 
