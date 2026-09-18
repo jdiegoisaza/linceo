@@ -8,6 +8,7 @@ the rule this module must satisfy.
 import typer
 
 from linceo import __version__
+from linceo.cli.baseline import baseline_app
 from linceo.cli.context import context
 from linceo.cli.doctor import doctor
 from linceo.cli.scan import scan_app
@@ -26,6 +27,7 @@ app = typer.Typer(
     help="Orchestrate DevSecOps tool executions into a single verdict.",
 )
 app.add_typer(scan_app, name="scan")
+app.add_typer(baseline_app, name="baseline")
 app.command("doctor")(doctor)
 app.command("context")(context)
 

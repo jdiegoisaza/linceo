@@ -28,6 +28,7 @@ from linceo.adapters.trivy import TRIVY_NATIVE_SEVERITY_MAP, TrivyIntegration, T
 from linceo.core.config import Config, ConfigurationError, load_config
 from linceo.core.context import ContextResolutionError, Platform
 from linceo.core.engine import run
+from linceo.core.execution import DataSource
 from linceo.core.exit_codes import EXIT_CONFIGURATION_ERROR, compute_exit_code
 from linceo.core.findings import Category
 from linceo.core.normalization import SeverityNormalizer
@@ -106,6 +107,41 @@ def resolve_context_provider(
     if resolved is Platform.AZURE_DEVOPS:
         return AzureDevOpsContextProvider(workspace_path=workspace_path)
     return LocalContextProvider(workspace_path=workspace_path)
+
+
+def detect_gitleaks_version(executor: ToolExecutor) -> str:
+    """Detect the installed gitleaks version, or `"unknown"` if its binary is missing.
+
+    Shared by `scan_secrets` and `linceo.cli.baseline` (both construct a
+    `GitleaksIntegration`): `"unknown"` is a safe placeholder to construct
+    one with either way — `engine.run` below attempts the exact same
+    invocation regardless, and its own missing-binary handling (ADR §5) is
+    the single place the actionable message for that case is produced
+    (ADR §1 checkpoint).
+    """
+    try:
+        return GitleaksIntegration.detect_version(executor)
+    except FileNotFoundError:
+        return "unknown"
+
+
+def detect_trivy(executor: ToolExecutor) -> tuple[str, tuple[DataSource, ...]]:
+    """Detect the installed trivy version and its vulnerability DB data sources.
+
+    `"unknown"`/no data sources on failure, for the same reason as
+    `detect_gitleaks_version` — shared by `scan_sca` and
+    `linceo.cli.baseline`. Data sources are only probed once a version was
+    actually detected, unguarded (matching `linceo.cli.doctor._probe_trivy`):
+    both calls hit the exact same `trivy version --format json`, so there
+    is no honest scenario where the first succeeds and the second then
+    hits a binary that was not there a moment ago.
+    """
+    try:
+        version = TrivyIntegration.detect_version(executor)
+    except (FileNotFoundError, TrivyOutputError):
+        return "unknown", ()
+
+    return version, TrivyIntegration.detect_data_sources(executor)
 
 
 def _package_root() -> str:
@@ -299,17 +335,7 @@ def scan_secrets(
     )
 
     executor = SubprocessToolExecutor()
-    try:
-        gitleaks_version = GitleaksIntegration.detect_version(executor)
-    except FileNotFoundError:
-        # No hint printed here: `engine.run` below attempts the exact same
-        # invocation regardless, and its own missing-binary handling (ADR
-        # §5) is the single place that decides the actionable message a
-        # missing binary produces (ADR §1 checkpoint) — carried on the
-        # resulting `ToolExecution.message` and displayed once `result`
-        # exists, below. This fallback only lets a `GitleaksIntegration` be
-        # constructed at all when its version cannot be detected.
-        gitleaks_version = "unknown"
+    gitleaks_version = detect_gitleaks_version(executor)
 
     _run_scan(
         category=Category.SECRETS,
@@ -394,20 +420,7 @@ def scan_sca(
     )
 
     executor = SubprocessToolExecutor()
-    try:
-        trivy_version = TrivyIntegration.detect_version(executor)
-    except (FileNotFoundError, TrivyOutputError):
-        # Same fallback as `scan_secrets` above, and for the same reason:
-        # `engine.run` below attempts the exact same invocation regardless,
-        # and is the single place that turns a missing (or, for trivy,
-        # otherwise unusable) binary into an actionable
-        # `ToolExecution.message` (ADR §1 checkpoint).
-        trivy_version = "unknown"
-
-    try:
-        db_data_sources = TrivyIntegration.detect_data_sources(executor)
-    except FileNotFoundError:
-        db_data_sources = ()
+    trivy_version, db_data_sources = detect_trivy(executor)
 
     _run_scan(
         category=Category.SCA,

@@ -36,43 +36,88 @@ existe una corrida limpia de leer.
 
 ### 2. Baseline — se congela lo existente, bloquea solo lo nuevo
 
-**Mecanismo:** crear (o completar) `.devsecops/config.toml` en el
-repositorio escaneado con una entrada `[[exclusions]]` por cada hallazgo
-activo que la corrida de observación reportó, y recién entonces cambiar
-`blocking: true` en la plantilla.
+**Mecanismo:** generar `.devsecops/config.toml` en el repositorio escaneado
+con una entrada `[[exclusions]]` por cada hallazgo activo que la corrida de
+observación reportó, y recién entonces cambiar `blocking: true` en la
+plantilla.
 
-El ADR (§8.2) describe un comando `baseline init` que generaría este archivo
-automáticamente a partir de una corrida real. **Ese comando no existe
-todavía en este release** — hoy el baseline se arma a mano, copiando el
-`fingerprint` (columna `FP` en la consola, `partialFingerprints` en el SARIF,
-`fingerprint` en el JSON) de cada hallazgo activo. Es mecánico pero no
-ambiguo: cada hallazgo activo de la corrida de observación se vuelve una
-entrada.
+`linceo baseline init` (ADR §8.2) hace exactamente esto: corre gitleaks y
+trivy de verdad sobre el estado actual del repositorio y escribe el
+fichero completo a partir de esa corrida — no requiere que exista una
+corrida de observación previa, ni copiar fingerprints a mano.
+
+```bash
+linceo baseline init --owner team-atlas
+```
+
+```
+Wrote 2 exclusion(s) to .devsecops/config.toml, all expiring 2026-10-18.
+```
+
+`--owner` es obligatorio y deliberadamente nunca se infiere (nunca del
+usuario de git ni de variables del entorno) — declara explícitamente quién
+responde por este baseline, casi siempre un equipo, no una persona
+(`owner = "team-atlas"`, no `owner = "jperez"`). El fichero resultante:
 
 ```toml
 version = 1
 
 [[exclusions]]
-fingerprint = "v1:7c2f9a10"           # prefijo inequívoco alcanza (ADR §7 "FP")
-reason = "Baseline de adopción — pendiente de triage real"
+fingerprint = "v1:7c2f9a10c4e0b8a1..."
+reason = "Initial adoption baseline — pending real triage"
 owner = "team-atlas"
-expires_at = 2026-10-17                # corto a propósito, ver abajo
+expires_at = 2026-10-18
+category = "secrets"
+rule_id = "generic-api-key"
+path = "src/config.py"
 
 [[exclusions]]
-fingerprint = "v1:e41b6d3c"
-reason = "Baseline de adopción — pendiente de triage real"
+fingerprint = "v1:e41b6d3c9f2a5d77..."
+reason = "Initial adoption baseline — pending real triage"
 owner = "team-atlas"
-expires_at = 2026-10-17
+expires_at = 2026-10-18
+category = "sca"
+rule_id = "CVE-2023-37920"
+path = "requirements.txt"
+package = "certifi"
+package_version = "2015.4.28"
 ```
 
-**El vencimiento va corto a propósito — 30 días, no los 90 que
-`max_expiry_horizon_days` permite como máximo.** El propio ADR es explícito
-sobre esto para el `baseline init` que todavía no existe: el objetivo es que
-el baseline "caduque por oleadas y fuerce un triaje real... en vez de
+`category`, `rule_id`, `path`, y (para `sca`) `package`/`package_version`
+viajan junto al `fingerprint` — no los escribe una persona, los genera el
+comando — porque el ADR (§8.2) los exige para que un futuro `baseline
+migrate` pueda reindexar cada entrada tras una subida de versión del
+algoritmo de huella o un cambio de `rule_id` en una herramienta, en vez de
+que la entrada quede huérfana e irrecuperable.
+
+**El vencimiento va corto a propósito — 30 días por defecto
+(`--expires-in-days` para cambiarlo), no los 90 que `max_expiry_horizon_days`
+permite como máximo.** El objetivo, declarado explícitamente en el ADR, es
+que el baseline "caduque por oleadas y fuerce un triaje real... en vez de
 congelar permanentemente el estado del repositorio". Un vencimiento largo
 logra exactamente lo que esta etapa existe para evitar — deuda que nunca se
-revisa. Armado a mano, ese mismo criterio sigue aplicando: mejor un
-vencimiento corto que un `reason` motivador.
+revisa.
+
+**No sobrescribe un `.devsecops/config.toml` existente sin confirmación
+explícita** — pregunta interactivamente antes de reemplazarlo, o `--force`
+para saltarse la pregunta en un script. El fichero se genera completo a
+partir de esta corrida (nada de lo que hubiera antes en ese archivo se
+conserva); si ya existe contenido curado a mano que quieres preservar,
+revísalo antes de confirmar el reemplazo.
+
+**Si algún tool falla o su binario no está en `PATH`, el comando se niega a
+escribir nada** — un baseline generado a partir de evidencia incompleta
+(por ejemplo, sin haber podido correr gitleaks) sería sistemáticamente
+incompleto en la categoría que faltó, exactamente el "gate verde
+engañoso" que el ADR §5 existe para evitar. Corre `linceo doctor` primero
+si esto ocurre.
+
+Una vez generado, el fichero es exactamente el mismo `.devsecops/config.toml`
+que este documento describe en el resto de sus secciones: se puede editar a
+mano después (añadir una exclusión puntual nueva, ajustar un `reason`), y
+`linceo baseline init` puede volver a correrse más adelante — sobre el
+mismo repositorio, tras haber corregido lo que ya se trió — para generar un
+nuevo baseline de lo que siga activo.
 
 **Lo que cambia de comportamiento en el momento del `blocking: true`:**
 cualquier hallazgo cubierto por una entrada `[[exclusions]]` vigente no

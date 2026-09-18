@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from datetime import date, timedelta
 
 import pytest
@@ -13,6 +14,7 @@ from linceo.core.policy import (
     ToolSkip,
     apply_exclusions,
     parse_policy_document,
+    render_exclusions_toml,
     split_tool_skips,
     thresholds_from_fail_on,
     validate_thresholds,
@@ -469,3 +471,180 @@ def test_tool_skip_with_an_unknown_field_is_a_configuration_error() -> None:
 def test_thresholds_table_not_a_mapping_is_a_configuration_error() -> None:
     with pytest.raises(PolicyConfigurationError, match="must be a table"):
         parse_policy_document({"thresholds": "not-a-table"}, today=TODAY, max_horizon_days=90)
+
+
+# --- exclusion "readable identity" fields (ADR §8.2, for `baseline migrate`) -----
+
+
+def test_exclusion_identity_fields_default_to_none_when_absent() -> None:
+    document = {
+        "exclusions": [
+            {"fingerprint": "v1:abc", "reason": "adoption", "owner": "alice", "expires_at": TODAY}
+        ]
+    }
+
+    parsed = parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+    exclusion = parsed.exclusions[0]
+    assert exclusion.category is None
+    assert exclusion.rule_id is None
+    assert exclusion.path is None
+    assert exclusion.package is None
+    assert exclusion.package_version is None
+
+
+def test_exclusion_identity_fields_round_trip_through_parsing() -> None:
+    document = {
+        "exclusions": [
+            {
+                "fingerprint": "v1:abc",
+                "reason": "adoption",
+                "owner": "alice",
+                "expires_at": TODAY,
+                "category": "sca",
+                "rule_id": "CVE-2023-37920",
+                "path": "requirements.txt",
+                "package": "certifi",
+                "package_version": "2015.4.28",
+            }
+        ]
+    }
+
+    exclusion = parse_policy_document(document, today=TODAY, max_horizon_days=90).exclusions[0]
+
+    assert exclusion.category is Category.SCA
+    assert exclusion.rule_id == "CVE-2023-37920"
+    assert exclusion.path == "requirements.txt"
+    assert exclusion.package == "certifi"
+    assert exclusion.package_version == "2015.4.28"
+
+
+def test_exclusion_unknown_category_is_a_configuration_error() -> None:
+    document = {
+        "exclusions": [
+            {
+                "fingerprint": "v1:abc",
+                "reason": "adoption",
+                "owner": "alice",
+                "expires_at": TODAY,
+                "category": "not-a-real-category",
+            }
+        ]
+    }
+
+    with pytest.raises(PolicyConfigurationError, match="not a known category"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
+def test_exclusion_identity_field_of_the_wrong_type_is_a_configuration_error() -> None:
+    document = {
+        "exclusions": [
+            {
+                "fingerprint": "v1:abc",
+                "reason": "adoption",
+                "owner": "alice",
+                "expires_at": TODAY,
+                "rule_id": 12345,
+            }
+        ]
+    }
+
+    with pytest.raises(PolicyConfigurationError, match="rule_id must be a string"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
+# --- render_exclusions_toml (ADR §8.2, `baseline init`'s own output) ------------
+
+
+def test_render_exclusions_toml_round_trips_through_parse_policy_document() -> None:
+    exclusions = (
+        Exclusion(
+            fingerprint="v1:abc",
+            reason="Initial adoption baseline — pending real triage",
+            owner="team-atlas",
+            expires_at=TODAY + timedelta(days=30),
+            category=Category.SECRETS,
+            rule_id="aws-access-token",
+            path="src/config.py",
+        ),
+        Exclusion(
+            fingerprint="v1:def",
+            reason="Initial adoption baseline — pending real triage",
+            owner="team-atlas",
+            expires_at=TODAY + timedelta(days=30),
+            category=Category.SCA,
+            rule_id="CVE-2023-37920",
+            path="requirements.txt",
+            package="certifi",
+            package_version="2015.4.28",
+        ),
+    )
+
+    rendered = render_exclusions_toml(exclusions)
+    document = tomllib.loads(rendered)
+    parsed = parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+    assert parsed.exclusions == exclusions
+
+
+def test_render_exclusions_toml_omits_absent_optional_fields() -> None:
+    exclusion = Exclusion(
+        fingerprint="v1:abc", reason="accepted risk", owner="alice", expires_at=TODAY
+    )
+
+    rendered = render_exclusions_toml((exclusion,))
+
+    assert "category" not in rendered
+    assert "rule_id" not in rendered
+    assert "package" not in rendered
+    assert "repositories" not in rendered
+
+
+def test_render_exclusions_toml_with_no_exclusions_is_still_a_valid_document() -> None:
+    rendered = render_exclusions_toml(())
+
+    document = tomllib.loads(rendered)
+
+    assert document == {"version": 1}
+
+
+def test_render_exclusions_toml_escapes_special_characters_in_strings() -> None:
+    exclusion = Exclusion(
+        fingerprint="v1:abc",
+        reason='Contains a "quote", a backslash \\, and a\nnewline',
+        owner="alice",
+        expires_at=TODAY,
+    )
+
+    rendered = render_exclusions_toml((exclusion,))
+    document = tomllib.loads(rendered)
+
+    assert document["exclusions"][0]["reason"] == exclusion.reason
+
+
+def test_render_exclusions_toml_escapes_a_bare_control_character() -> None:
+    """A control character with no named TOML escape (e.g. `\\x01`) still renders as a
+    valid, parseable string, via the `\\uXXXX` form."""
+    exclusion = Exclusion(
+        fingerprint="v1:abc", reason="bell\x07here", owner="alice", expires_at=TODAY
+    )
+
+    rendered = render_exclusions_toml((exclusion,))
+    document = tomllib.loads(rendered)
+
+    assert document["exclusions"][0]["reason"] == "bell\x07here"
+
+
+def test_render_exclusions_toml_renders_repositories_as_a_list() -> None:
+    exclusion = Exclusion(
+        fingerprint="v1:abc",
+        reason="accepted risk",
+        owner="alice",
+        expires_at=TODAY,
+        repositories=("orion-web", "orion-api"),
+    )
+
+    rendered = render_exclusions_toml((exclusion,))
+    document = tomllib.loads(rendered)
+
+    assert document["exclusions"][0]["repositories"] == ["orion-web", "orion-api"]

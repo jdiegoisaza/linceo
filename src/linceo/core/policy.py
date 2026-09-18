@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from enum import StrEnum
 
-from linceo.core.findings import Finding
+from linceo.core.findings import Category, Finding
 from linceo.core.severity import SEVERITY_ORDER, Severity
 
 #: Maps a severity to the highest finding count still allowed at that level;
@@ -44,6 +44,14 @@ Thresholds = Mapping[Severity, int]
 #: arbitrarily far in the future (e.g. "2099-01-01") is eternal debt with
 #: extra steps, so exceeding this horizon is a configuration error.
 DEFAULT_MAX_HORIZON_DAYS = 90
+
+#: Default `expires_at` distance for a `baseline init`-generated exclusion,
+#: deliberately shorter than `DEFAULT_MAX_HORIZON_DAYS` (ADR §8.2): a mass
+#: adoption baseline must "caducar por oleadas y forzar un triaje real", not
+#: freeze the repository's past state — see `docs/ADOPTION.md`, "Baseline",
+#: which already documented 30 days as the concrete number before this
+#: command existed to generate one.
+DEFAULT_BASELINE_EXPIRY_DAYS = 30
 
 #: Default number of rows a console table shows before summarizing the rest
 #: (ADR §7) — a presentation setting only; JSON (and SARIF) always carry
@@ -155,6 +163,20 @@ class Exclusion:
     empty (the default) means the exclusion is global; non-empty scopes it
     to those repositories only (ADR §8, "Alcance de las exclusiones") —
     matched against `ExecutionContext.repository`.
+
+    `category`, `rule_id`, `path`, `package`, and `package_version` are the
+    "readable identity fields" ADR §8.2 requires alongside the fingerprint
+    itself: none of them is ever consulted by `apply_exclusions` (matching
+    is by `fingerprint` alone, unchanged) — they exist so a future
+    `baseline migrate`, after a fingerprint algorithm version bump or a
+    tool's `rule_id` rename, can re-resolve which *current* finding an
+    *old* entry meant, instead of the entry becoming unrecoverable the
+    moment its `fingerprint` stops matching anything. All five are `None`
+    for an exclusion nobody generated from a real run — a hand-written
+    entry naming just a known fingerprint remains entirely valid without
+    them. `package`/`package_version` are set only for a `Category.SCA`
+    entry, mirroring `Finding.package`; `path` is the file (`secrets`) or
+    manifest (`sca`) path, mirroring `Finding.location.path`.
     """
 
     fingerprint: str
@@ -162,6 +184,11 @@ class Exclusion:
     owner: str
     expires_at: date
     repositories: tuple[str, ...] = ()
+    category: Category | None = None
+    rule_id: str | None = None
+    path: str | None = None
+    package: str | None = None
+    package_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +338,12 @@ class PolicyDocument:
 
 
 _EXCLUSION_REQUIRED_FIELDS = frozenset({"fingerprint", "reason", "owner", "expires_at"})
-_EXCLUSION_KNOWN_FIELDS = _EXCLUSION_REQUIRED_FIELDS | {"repositories"}
+#: Optional "readable identity" fields (ADR §8.2) — see `Exclusion`'s own
+#: docstring for what each means and why they exist.
+_EXCLUSION_IDENTITY_FIELDS = frozenset(
+    {"category", "rule_id", "path", "package", "package_version"}
+)
+_EXCLUSION_KNOWN_FIELDS = _EXCLUSION_REQUIRED_FIELDS | {"repositories"} | _EXCLUSION_IDENTITY_FIELDS
 _TOOL_SKIP_REQUIRED_FIELDS = frozenset({"tool", "reason", "owner", "expires_at"})
 
 
@@ -394,6 +426,37 @@ def _parse_thresholds(raw: object | None) -> Thresholds | None:
     return thresholds
 
 
+def _parse_optional_str(entry: Mapping[str, object], *, field: str) -> str | None:
+    """Read an optional string field, or `None` if absent.
+
+    Raises:
+        PolicyConfigurationError: if the field is present but not a string.
+    """
+    value = entry.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        msg = f"exclusions.{field} must be a string, got {type(value).__name__}"
+        raise PolicyConfigurationError(msg)
+    return value
+
+
+def _parse_optional_category(entry: Mapping[str, object]) -> Category | None:
+    """Read the optional `category` identity field, or `None` if absent.
+
+    Raises:
+        PolicyConfigurationError: if present but not a known `Category`.
+    """
+    value = entry.get("category")
+    if value is None:
+        return None
+    try:
+        return Category(str(value))
+    except ValueError as exc:
+        msg = f"exclusions.category is not a known category: {value!r}"
+        raise PolicyConfigurationError(msg) from exc
+
+
 def _parse_exclusion(
     entry: Mapping[str, object], *, today: date, max_horizon_days: int
 ) -> Exclusion:
@@ -401,10 +464,14 @@ def _parse_exclusion(
 
     `entry` is already known to be a table — `_as_table_list` guarantees
     that for every item it returns — so this only validates its fields.
+    `category`/`rule_id`/`path`/`package`/`package_version` (ADR §8.2's
+    "readable identity fields") are all optional: a hand-written exclusion
+    naming just a fingerprint is unaffected.
 
     Raises:
         PolicyConfigurationError: for an unknown or missing field, an
-            invalid `repositories` value, or an `expires_at` beyond
+            invalid `repositories` value, an identity field of the wrong
+            type or an unrecognized `category`, or an `expires_at` beyond
             `max_horizon_days`.
     """
     unknown = set(entry) - _EXCLUSION_KNOWN_FIELDS
@@ -430,6 +497,11 @@ def _parse_exclusion(
         owner=str(entry["owner"]),
         expires_at=expires_at,
         repositories=tuple(repositories_raw),
+        category=_parse_optional_category(entry),
+        rule_id=_parse_optional_str(entry, field="rule_id"),
+        path=_parse_optional_str(entry, field="path"),
+        package=_parse_optional_str(entry, field="package"),
+        package_version=_parse_optional_str(entry, field="package_version"),
     )
     _validate_horizon(
         exclusion.fingerprint, expires_at, today=today, max_horizon_days=max_horizon_days
@@ -494,3 +566,73 @@ def parse_policy_document(
         for entry in _as_table_list(document.get("skipped_tools"), name="skipped_tools")
     )
     return PolicyDocument(thresholds=thresholds, exclusions=exclusions, tool_skips=tool_skips)
+
+
+#: TOML basic-string escapes for characters that may never appear literally
+#: inside a double-quoted string (TOML v1.0: quotation mark, backslash, and
+#: every control character other than tab/newline/etc., which get their own
+#: named escape below).
+_TOML_STRING_ESCAPES: Mapping[str, str] = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _toml_string(value: str) -> str:
+    """Render `value` as a TOML basic (double-quoted) string, escaped per the TOML v1.0 spec.
+
+    The project has no TOML *writer* dependency (ADR §8.3: Typer, via
+    `typer-slim`, is the base package's only third-party dependency, and
+    `tomllib` — used everywhere else in this module — only reads); this is
+    the minimal serialization `render_exclusions_toml` needs, not a
+    general-purpose TOML encoder.
+    """
+    chars: list[str] = []
+    for char in value:
+        code_point = ord(char)
+        if char in _TOML_STRING_ESCAPES:
+            chars.append(_TOML_STRING_ESCAPES[char])
+        elif code_point < 0x20 or code_point == 0x7F:
+            chars.append(f"\\u{code_point:04x}")
+        else:
+            chars.append(char)
+    return f'"{"".join(chars)}"'
+
+
+def render_exclusions_toml(exclusions: Sequence[Exclusion]) -> str:
+    """Render `exclusions` as a complete `version = 1` policy document (ADR §8.2).
+
+    `linceo baseline init`'s own output — the serialization counterpart to
+    `parse_policy_document`'s `[[exclusions]]` handling, for exactly the
+    same schema: every field this writes, that function can read back
+    (`tests/unit/test_policy.py` round-trips this). Writes only
+    `version` and `[[exclusions]]`; a `baseline init`-generated document
+    declares no `[thresholds]`/`[[skipped_tools]]` of its own.
+    """
+    lines = ["version = 1", ""]
+    for exclusion in exclusions:
+        lines.append("[[exclusions]]")
+        lines.append(f"fingerprint = {_toml_string(exclusion.fingerprint)}")
+        lines.append(f"reason = {_toml_string(exclusion.reason)}")
+        lines.append(f"owner = {_toml_string(exclusion.owner)}")
+        lines.append(f"expires_at = {exclusion.expires_at.isoformat()}")
+        if exclusion.repositories:
+            rendered = ", ".join(_toml_string(repo) for repo in exclusion.repositories)
+            lines.append(f"repositories = [{rendered}]")
+        if exclusion.category is not None:
+            lines.append(f"category = {_toml_string(exclusion.category.value)}")
+        if exclusion.rule_id is not None:
+            lines.append(f"rule_id = {_toml_string(exclusion.rule_id)}")
+        if exclusion.path is not None:
+            lines.append(f"path = {_toml_string(exclusion.path)}")
+        if exclusion.package is not None:
+            lines.append(f"package = {_toml_string(exclusion.package)}")
+        if exclusion.package_version is not None:
+            lines.append(f"package_version = {_toml_string(exclusion.package_version)}")
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
