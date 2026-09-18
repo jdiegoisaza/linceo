@@ -25,7 +25,10 @@
 #
 # `BUILD_DATE`/`VCS_REF` are metadata only (OCI labels, below) — omitting
 # them still produces a working image, just with less precise provenance.
-# See README.md, "Container image", for how to run it.
+# `LINCEO_VERSION` defaults to this project's pre-release placeholder; the
+# release workflow (.github/workflows/release.yml) is what passes the real
+# one, derived from the git tag — see docs/RELEASING.md. See README.md,
+# "Container image", for how to run it.
 
 # ---------------------------------------------------------------------------
 # Base images, pinned by digest (ADR R4: "nunca por tag") — a tag can move
@@ -46,6 +49,17 @@ ARG GITLEAKS_VERSION=8.30.1
 ARG TRIVY_VERSION=0.74.0
 ARG UV_VERSION=0.12.15
 
+# Derived from the release tag by CI (.github/workflows/release.yml),
+# never hand-edited — see docs/RELEASING.md. Declared here, before the
+# first FROM, so both `python-build` (bakes it into the installed wheel's
+# own version metadata, since that stage's build context carries no `.git`
+# for hatch-vcs to read) and `final` (OCI label) resolve the exact same
+# value. The default is this project's pre-release placeholder, matching
+# `[tool.hatch.version.raw-options].fallback_version` in pyproject.toml —
+# a local `docker build` with no override behaves exactly like a local
+# `uv build` with no tag in scope.
+ARG LINCEO_VERSION=0.1.0.dev0
+
 # ---------------------------------------------------------------------------
 # Stage: python-build — build the linceo wheel and install it, with no dev
 # dependencies, into a standalone venv. No `--platform=$BUILDPLATFORM`
@@ -56,6 +70,7 @@ ARG UV_VERSION=0.12.15
 FROM python:3.12-slim@${PYTHON_BASE_DIGEST} AS python-build
 
 ARG UV_VERSION
+ARG LINCEO_VERSION
 ENV PIP_NO_CACHE_DIR=1 \
     UV_PYTHON_DOWNLOADS=never
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
@@ -71,7 +86,22 @@ COPY src/ src/
 # project's own CI verifies against a clean environment
 # (.github/workflows/ci.yml, "Install the built wheel into a clean
 # environment").
-RUN uv build --wheel --out-dir /dist \
+#
+# `SETUPTOOLS_SCM_PRETEND_VERSION`: this build context carries no `.git`
+# (only the files COPYed above), so hatch-vcs — the same version source
+# `uv build` uses outside this image, see pyproject.toml — would have no
+# tag to read here and would always fall back to the placeholder version.
+# Pinning it to `LINCEO_VERSION` explicitly is what makes `linceo
+# --version` inside the running container agree with the image's own
+# `org.opencontainers.image.version` label (`final` stage, below) instead
+# of silently disagreeing with it on every real release. The plain
+# (package-name-less) form is what hatch-vcs actually honors here — its
+# per-package `_FOR_LINCEO` variant is a setuptools-scm feature hatch-vcs
+# does not forward the distribution name for, verified empirically against
+# this exact build context; safe to rely on regardless, since this
+# `uv build` only ever builds the one package in it.
+RUN SETUPTOOLS_SCM_PRETEND_VERSION="${LINCEO_VERSION}" \
+      uv build --wheel --out-dir /dist \
     && uv venv --python python3.12 /opt/linceo/venv \
     && uv pip install --python /opt/linceo/venv/bin/python /dist/*.whl
 
@@ -172,9 +202,7 @@ ARG GITLEAKS_VERSION
 ARG TRIVY_VERSION
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
-# Kept in sync with `[project] version` in pyproject.toml by hand today —
-# this project has no released version yet to script it against.
-ARG LINCEO_VERSION=0.1.0.dev0
+ARG LINCEO_VERSION
 
 # The "embedded, queryable version manifest" ADR R4 asks for — its
 # externally queryable half: readable with `docker inspect` or `skopeo

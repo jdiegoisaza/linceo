@@ -22,11 +22,31 @@ env:
   UV_LOCKED: "1"
 
 jobs:
-  # Mirrors the `lint`/`types`/`test` jobs in ci.yml: the publish job below
-  # must not run unless all three pass, and a release tag is not guaranteed
-  # to point at a commit that already went through ci.yml (a tag can be
-  # pushed against any commit) — so this workflow re-runs them itself
-  # rather than relying on ci.yml having already run.
+  # Single source of truth for "what version is this release", computed
+  # once from the tag and consumed by both publish jobs below — the PyPI
+  # package version (pyproject.toml, hatch-vcs) and the container image's
+  # tag/LINCEO_VERSION label are two independent build products of the
+  # same release and must not each derive it their own way.
+  version:
+    name: Derive release version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Derive version from the pushed tag
+        id: version
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${version} (from tag ${tag})"
+
+  # Mirrors the `lint`/`types`/`test` jobs in ci.yml: neither publish job
+  # below may run unless all three pass, and a release tag is not
+  # guaranteed to point at a commit that already went through ci.yml (a
+  # tag can be pushed against any commit) — so this workflow re-runs them
+  # itself rather than relying on ci.yml having already run.
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -68,9 +88,9 @@ jobs:
       - run: uv sync --frozen
       - run: uv run pytest
 
-  publish:
+  publish-pypi:
     name: Build and publish to PyPI
-    needs: [lint, types, test]
+    needs: [version, lint, types, test]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -101,17 +121,88 @@ jobs:
       - name: Verify the git tag and the built package version match
         run: |
           set -eu
-          tag="${GITHUB_REF_NAME}"
-          expected_version="${tag#v}"
+          expected_version="${{ needs.version.outputs.version }}"
           wheel="$(ls dist/*.whl)"
           actual_version="$(basename "$wheel" | cut -d- -f2)"
           if [ "$expected_version" != "$actual_version" ]; then
-            echo "::error::Tag $tag (expected version $expected_version) does not match the built package version $actual_version. Refusing to publish — see docs/RELEASING.md." >&2
+            echo "::error::Tag ${GITHUB_REF_NAME} (expected version $expected_version) does not match the built package version $actual_version. Refusing to publish — see docs/RELEASING.md." >&2
             exit 1
           fi
-          echo "Verified: tag $tag matches package version $actual_version"
+          echo "Verified: tag ${GITHUB_REF_NAME} matches package version $actual_version"
 
       - name: Publish to PyPI (Trusted Publishing, OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+  publish-ghcr:
+    name: Build and publish container image to GHCR
+    needs: [version, lint, types, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # No PAT, no stored secret: GITHUB_TOKEN is enough to push to this
+      # repository's own GHCR namespace, scoped down to exactly this.
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        # No fetch-depth: 0 here — unlike publish-pypi, this job never
+        # needs git tag history: LINCEO_VERSION comes from the `version`
+        # job's output, not from hatch-vcs reading tags directly.
+
+      - name: Compute image reference, tags, and build date
+        id: meta
+        run: |
+          set -eu
+          owner_lower="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner_lower}/linceo"
+          version="${{ needs.version.outputs.version }}"
+
+          tags="${image}:${version}"
+          # `latest` only for an actual final release (exactly X.Y.Z) —
+          # never for a pre-release tag like v0.3.0-rc1, which would
+          # otherwise point `latest` at something unstable. Built via a
+          # command substitution, not a literal multi-line string in this
+          # script, so the tag list can't pick up this file's own
+          # indentation as part of its second line.
+          if printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            tags="$(printf '%s\n%s' "$tags" "${image}:latest")"
+          fi
+
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<TAGS_EOF"
+            printf '%s\n' "$tags"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing ${image}, tags:"
+          printf '%s\n' "$tags"
+
+      - uses: docker/setup-buildx-action@v3
+        # Required, not just an optimization: the Dockerfile uses the
+        # `# syntax=docker/dockerfile:1` directive and a `--platform`
+        # clause on one of its FROM lines, both BuildKit-only features.
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+            VCS_REF=${{ github.sha }}
+            LINCEO_VERSION=${{ needs.version.outputs.version }}
+          # GITLEAKS_VERSION/TRIVY_VERSION/UV_VERSION are deliberately not
+          # overridden here — the Dockerfile's own pinned defaults (ADR
+          # R4) are the ones this release is actually verified against;
+          # this job's job is to publish that image, not to choose
+          # different tool versions for it.

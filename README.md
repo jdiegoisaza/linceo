@@ -37,7 +37,30 @@ and the exact tool versions it invokes: it bundles pinned, checksum-verified
 builds of Gitleaks and Trivy, plus Trivy's vulnerability database
 pre-fetched at build time, so a scan runs fully offline by default.
 
-Build it from the repository root:
+Pull a published release — built and pushed by
+[`.github/workflows/release.yml`](.github/workflows/release.yml), no
+authentication needed (see [`docs/RELEASING.md`](docs/RELEASING.md)):
+
+```bash
+docker pull ghcr.io/jdiegoisaza/linceo:latest    # or a specific version, e.g. :0.2.0
+```
+
+Run it against a workspace by mounting it and appending a subcommand —
+exactly as you would to the `linceo` binary itself:
+
+```bash
+docker run --rm -v "$PWD:/workspace" ghcr.io/jdiegoisaza/linceo scan secrets
+docker run --rm -v "$PWD:/workspace" ghcr.io/jdiegoisaza/linceo scan sca --fail-on high
+docker run --rm ghcr.io/jdiegoisaza/linceo doctor
+```
+
+`docker run --rm ghcr.io/jdiegoisaza/linceo` alone (no subcommand) prints
+`--help`. The image runs as a fixed non-root user (uid/gid `1000`); if the
+mounted workspace's files are owned by a different uid on the host, add
+`--user "$(id -u):$(id -g)"` to the `docker run` invocation.
+
+To build it yourself instead — for local development, or to reproduce a
+published image bit-for-bit from source — from the repository root:
 
 ```bash
 docker build \
@@ -46,27 +69,19 @@ docker build \
   -t linceo:local .
 ```
 
-Run it against a workspace by mounting it and appending a subcommand —
-exactly as you would to the `linceo` binary itself:
-
-```bash
-docker run --rm -v "$PWD:/workspace" linceo:local scan secrets
-docker run --rm -v "$PWD:/workspace" linceo:local scan sca --fail-on high
-docker run --rm linceo:local doctor
-```
-
-`docker run --rm linceo:local` alone (no subcommand) prints `--help`. The
-image runs as a fixed non-root user (uid/gid `1000`); if the mounted
-workspace's files are owned by a different uid on the host, add
-`--user "$(id -u):$(id -g)"` to the `docker run` invocation.
+(swap `ghcr.io/jdiegoisaza/linceo` for `linceo:local` in the `docker run`
+examples above). Omitting `LINCEO_VERSION` here is expected for a local
+build — it's the release workflow that passes the real one; see
+`docs/RELEASING.md`, "Container image".
 
 Which exact versions of Gitleaks and Trivy — and how old its vulnerability
 database is — a given image carries is queryable two ways, and both
 describe the same pinned reality (see `Dockerfile` and
 `src/linceo/cli/doctor.py`):
 
-- **Without starting the container:** `docker inspect linceo:local` (or
-  `skopeo inspect` against a pushed image) shows the OCI labels the build
+- **Without starting the container:** `docker inspect
+  ghcr.io/jdiegoisaza/linceo:latest` (or `linceo:local`, or `skopeo
+  inspect` against any pushed image) shows the OCI labels the build
   embeds — `dev.linceo.tool.gitleaks.version`, `dev.linceo.tool.trivy.version`,
   `dev.linceo.trivy-db.built-at`, plus the standard `org.opencontainers.image.*`
   set.
