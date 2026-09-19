@@ -98,6 +98,34 @@ def _patch_executor(
     )
 
 
+class _FixedDateTime(datetime):
+    """Stands in for `datetime` inside `linceo.cli.baseline` so `datetime.now(UTC)` returns `_NOW`.
+
+    `init()` reads the wall clock exactly once, at the CLI boundary (ADR R3: no
+    `core` module ever does) — this is the only way a test can pin that one real
+    clock read to a fixed value, without threading a clock port through a whole
+    CLI invocation just for this. Without it, `expires_at` values `baseline init`
+    writes are computed from whatever the real wall clock happens to be when the
+    test runs, not from `_NOW` — the exact non-determinism R3 exists to rule out.
+    """
+
+    @classmethod
+    def now(cls, tz: object = None) -> datetime:  # type: ignore[override]  # noqa: ARG003
+        return _NOW
+
+
+def _patch_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeze `linceo.cli.baseline`'s one real clock read at `_NOW`.
+
+    Required by any test that asserts an exact `expires_at` (via
+    `baseline_wave_expiry(today=_NOW.date(), ...)`) rather than just a
+    relative bound — otherwise the assertion compares a value the CLI
+    computed from the real, unpatched wall clock against one computed from
+    `_NOW`, and the two silently drift apart a day at a time.
+    """
+    monkeypatch.setattr("linceo.cli.baseline.datetime", _FixedDateTime)
+
+
 def test_owner_is_required(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "widgets")
 
@@ -115,6 +143,7 @@ def test_writes_one_exclusion_per_active_finding_with_identity_fields(
         monkeypatch,
         _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="one_finding.json"),
     )
+    _patch_clock(monkeypatch)
 
     result = runner.invoke(app, ["baseline", "init", "--path", str(repo), "--owner", "team-atlas"])
 
@@ -191,6 +220,7 @@ def test_custom_reason_and_expiry_are_applied_to_every_entry(
         monkeypatch,
         _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="one_finding.json"),
     )
+    _patch_clock(monkeypatch)
 
     result = runner.invoke(
         app,
