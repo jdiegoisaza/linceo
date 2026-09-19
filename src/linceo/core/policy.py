@@ -38,11 +38,12 @@ mapped by `core.config` to exit code 2).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from enum import StrEnum
 
 from linceo.core.findings import Category, Finding
+from linceo.core.fingerprint import FINGERPRINT_VERSION
 from linceo.core.severity import SEVERITY_ORDER, Severity
 
 #: Maps a severity to the highest finding count still allowed at that level;
@@ -761,14 +762,19 @@ _TOML_STRING_ESCAPES: Mapping[str, str] = {
 }
 
 
-def _toml_string(value: str) -> str:
+def render_toml_string(value: str) -> str:
     """Render `value` as a TOML basic (double-quoted) string, escaped per the TOML v1.0 spec.
 
     The project has no TOML *writer* dependency (ADR §8.3: Typer, via
     `typer-slim`, is the base package's only third-party dependency, and
     `tomllib` — used everywhere else in this module — only reads); this is
     the minimal serialization `render_exclusions_toml` needs, not a
-    general-purpose TOML encoder.
+    general-purpose TOML encoder. Public (not `_`-prefixed) because
+    `linceo.cli.baseline`'s `migrate` command needs the exact same encoding
+    to locate and replace one field's value in an existing document's raw
+    text (ADR §8.2) — two independent implementations of TOML string
+    escaping would be exactly the kind of drift this project avoids
+    elsewhere (e.g. `LEVEL_1_FIELD_NAMES`, shared rather than duplicated).
     """
     chars: list[str] = []
     for char in value:
@@ -785,23 +791,23 @@ def _toml_string(value: str) -> str:
 def _render_exclusion_block(exclusion: Exclusion) -> str:
     """Render one `[[exclusions]]` table — no `version` header, no trailing blank line."""
     lines = ["[[exclusions]]"]
-    lines.append(f"fingerprint = {_toml_string(exclusion.fingerprint)}")
-    lines.append(f"reason = {_toml_string(exclusion.reason)}")
-    lines.append(f"owner = {_toml_string(exclusion.owner)}")
+    lines.append(f"fingerprint = {render_toml_string(exclusion.fingerprint)}")
+    lines.append(f"reason = {render_toml_string(exclusion.reason)}")
+    lines.append(f"owner = {render_toml_string(exclusion.owner)}")
     lines.append(f"expires_at = {exclusion.expires_at.isoformat()}")
     if exclusion.repositories:
-        rendered = ", ".join(_toml_string(repo) for repo in exclusion.repositories)
+        rendered = ", ".join(render_toml_string(repo) for repo in exclusion.repositories)
         lines.append(f"repositories = [{rendered}]")
     if exclusion.category is not None:
-        lines.append(f"category = {_toml_string(exclusion.category.value)}")
+        lines.append(f"category = {render_toml_string(exclusion.category.value)}")
     if exclusion.rule_id is not None:
-        lines.append(f"rule_id = {_toml_string(exclusion.rule_id)}")
+        lines.append(f"rule_id = {render_toml_string(exclusion.rule_id)}")
     if exclusion.path is not None:
-        lines.append(f"path = {_toml_string(exclusion.path)}")
+        lines.append(f"path = {render_toml_string(exclusion.path)}")
     if exclusion.package is not None:
-        lines.append(f"package = {_toml_string(exclusion.package)}")
+        lines.append(f"package = {render_toml_string(exclusion.package)}")
     if exclusion.package_version is not None:
-        lines.append(f"package_version = {_toml_string(exclusion.package_version)}")
+        lines.append(f"package_version = {render_toml_string(exclusion.package_version)}")
     return "\n".join(lines)
 
 
@@ -846,3 +852,198 @@ def render_exclusion_fragment(exclusions: Sequence[Exclusion]) -> str:
         return ""
     body = "\n\n".join(_render_exclusion_block(exclusion) for exclusion in exclusions)
     return f"{body}\n"
+
+
+def is_current_fingerprint(fingerprint: str) -> bool:
+    """Whether `fingerprint` carries today's `FINGERPRINT_VERSION` prefix (ADR §5, §8.2).
+
+    An exclusion whose `fingerprint` fails this is what `plan_baseline_migration`
+    calls orphaned by version — regardless of whether it still matches
+    anything: the version prefix is checked on its own value, never by
+    comparing against a run's findings.
+    """
+    version, separator, _ = fingerprint.partition(":")
+    return separator != "" and version == FINGERPRINT_VERSION
+
+
+@dataclass(frozen=True, slots=True)
+class ExclusionMigration:
+    """One orphaned entry successfully reindexed onto a current finding (ADR §8.2).
+
+    `original` is the exact object from the input `exclusions` — never a
+    copy — so a caller can recover its position in the source document by
+    identity (`id(original)`), which is how `linceo.cli.baseline.migrate`
+    locates the `[[exclusions]]` block to rewrite without needing to
+    reparse or re-render anything else in the file. `migrated` carries
+    `original.reason`/`owner`/`expires_at`/`repositories` untouched
+    (`dataclasses.replace`) — migrating is not renewing the debt, it is
+    keeping it addressed correctly — with a fresh `fingerprint` and
+    `category`/`rule_id`/`path`/`package`/`package_version` refreshed from
+    the finding that matched, so a *second* migration later (say, another
+    `rule_id` rename) still has accurate identity fields to reindex from.
+    """
+
+    original: Exclusion
+    migrated: Exclusion
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationPlan:
+    """What `baseline migrate` would do to `exclusions`, computed against `findings` (ADR §8.2).
+
+    `unchanged` already carries the current `FINGERPRINT_VERSION` — left
+    alone. `migrated` pairs each orphaned entry that could be reindexed
+    with its replacement. `unresolved` is every orphaned entry no current
+    finding's identity could account for — reported, never silently
+    dropped: the finding behind it may have been genuinely fixed, or its
+    identity may have drifted in a way this cannot recover automatically
+    either way, so a human decides, with the original entry left intact
+    for them to act on. `out_of_scope` is every orphaned entry whose
+    `repositories` do not include the repository this run scanned — left
+    untouched and unreported as unresolved, because this run has no
+    evidence about a different repository to reindex it against at all;
+    running `migrate` again from within a matching repository is what
+    resolves these.
+    """
+
+    unchanged: tuple[Exclusion, ...]
+    migrated: tuple[ExclusionMigration, ...]
+    unresolved: tuple[Exclusion, ...]
+    out_of_scope: tuple[Exclusion, ...]
+
+
+_IdentityKey = tuple[Category | None, str | None, str | None, str | None, str | None]
+
+
+def _exclusion_identity_key(entry: Exclusion, *, include_rule_id: bool) -> _IdentityKey:
+    """`entry`'s identity as a plain tuple, for equality-matching against a finding's own.
+
+    With `include_rule_id=True`, the full identity ADR §8.2 stores
+    (`category`, `rule_id`, `path`, `package`, `package_version`) — this is
+    the tier that recovers a pure fingerprint-version bump, nothing else
+    about the finding having changed. With `include_rule_id=False`, the
+    `rule_id` slot is `None` on both sides of the comparison instead of
+    omitted — same tuple shape either way, `rule_id` just never
+    distinguishes anything in this tier — which additionally recovers a
+    tool renaming its `rule_id` between versions (ADR §5): the same real
+    thing at the same location, just under a new name.
+    """
+    return (
+        entry.category,
+        entry.rule_id if include_rule_id else None,
+        entry.path,
+        entry.package,
+        entry.package_version,
+    )
+
+
+def _finding_identity_key(finding: Finding, *, include_rule_id: bool) -> _IdentityKey:
+    """`finding`'s identity as the same shape of tuple `_exclusion_identity_key` produces."""
+    package = finding.package.name if finding.package is not None else None
+    package_version = finding.package.version if finding.package is not None else None
+    return (
+        finding.category,
+        finding.rule_id if include_rule_id else None,
+        finding.location.path,
+        package,
+        package_version,
+    )
+
+
+def _find_unique_identity_match(
+    entry: Exclusion, candidates: Sequence[Finding], *, include_rule_id: bool
+) -> Finding | None:
+    """The one finding in `candidates` sharing `entry`'s identity, or `None`.
+
+    `None` both when nothing matches and when more than one does — an
+    ambiguous identity is exactly the class of "might silently pick the
+    wrong one" this project already refuses elsewhere (ADR §7's `FP`
+    prefix matching, ADR §8.2's fingerprint-prefix matching): reported as
+    unresolved rather than guessed, never resolved by picking the first.
+    """
+    key = _exclusion_identity_key(entry, include_rule_id=include_rule_id)
+    matches = [
+        finding
+        for finding in candidates
+        if _finding_identity_key(finding, include_rule_id=include_rule_id) == key
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _reindex_exclusion(entry: Exclusion, finding: Finding) -> Exclusion:
+    """Build `entry`'s replacement from the `finding` that matched it (ADR §8.2).
+
+    `category`, `path`, `package`, and `package_version` are always
+    already equal between `entry` and `finding` by construction — both
+    matching tiers in `_find_unique_identity_match` require it — so only
+    `fingerprint` (always, since a migrated entry's old one is by
+    definition not current) and `rule_id` (only when a rename is what the
+    second tier recovered) can actually differ from `entry`'s own values.
+    """
+    package = finding.package.name if finding.package is not None else None
+    package_version = finding.package.version if finding.package is not None else None
+    return replace(
+        entry,
+        fingerprint=finding.fingerprint,
+        category=finding.category,
+        rule_id=finding.rule_id,
+        path=finding.location.path,
+        package=package,
+        package_version=package_version,
+    )
+
+
+def plan_baseline_migration(
+    exclusions: tuple[Exclusion, ...], findings: tuple[Finding, ...], *, repository: str
+) -> MigrationPlan:
+    """Compute how `exclusions` reindex against `findings` from a fresh run (ADR §8.2, §5).
+
+    Every entry already on `FINGERPRINT_VERSION` is left in `unchanged`,
+    untouched. Every other entry is orphaned by version and, if in scope
+    for `repository` (its `repositories` empty, or naming `repository`),
+    attempted against `findings` not already claimed by an `unchanged`
+    entry's own current fingerprint (so migration can never create a
+    second entry pointing at a finding an existing, valid exclusion
+    already covers) — first by its full identity
+    (`category`/`rule_id`/`path`/`package`/`package_version`), then, only
+    if that finds nothing, by the same identity without `rule_id` (ADR
+    §5's tool-renames-its-rule_id case). Processed in `exclusions`' own
+    order, and a finding is removed from the pool the moment it is
+    claimed, so two orphaned entries can never both reindex onto the same
+    one (ADR R3: the same input always resolves the same way).
+
+    An orphaned entry outside `repository`'s scope goes to `out_of_scope`
+    instead of being attempted at all — this run's `findings` say nothing
+    about a different repository, so guessing would risk reindexing an
+    exclusion onto an unrelated finding that only coincidentally shares an
+    identity in some other repository's codebase.
+    """
+    unchanged = tuple(e for e in exclusions if is_current_fingerprint(e.fingerprint))
+    orphaned = tuple(e for e in exclusions if not is_current_fingerprint(e.fingerprint))
+
+    in_scope = tuple(e for e in orphaned if not e.repositories or repository in e.repositories)
+    out_of_scope = tuple(e for e in orphaned if e.repositories and repository not in e.repositories)
+
+    claimed = {e.fingerprint for e in unchanged}
+    available = [f for f in findings if f.fingerprint not in claimed]
+
+    migrated: list[ExclusionMigration] = []
+    unresolved: list[Exclusion] = []
+    for entry in in_scope:
+        match = _find_unique_identity_match(
+            entry, available, include_rule_id=True
+        ) or _find_unique_identity_match(entry, available, include_rule_id=False)
+        if match is None:
+            unresolved.append(entry)
+            continue
+        available.remove(match)
+        migrated.append(
+            ExclusionMigration(original=entry, migrated=_reindex_exclusion(entry, match))
+        )
+
+    return MigrationPlan(
+        unchanged=unchanged,
+        migrated=tuple(migrated),
+        unresolved=tuple(unresolved),
+        out_of_scope=out_of_scope,
+    )

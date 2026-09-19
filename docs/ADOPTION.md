@@ -87,10 +87,10 @@ package_version = "2015.4.28"
 
 `category`, `rule_id`, `path`, y (para `sca`) `package`/`package_version`
 viajan junto al `fingerprint` — no los escribe una persona, los genera el
-comando — porque el ADR (§8.2) los exige para que un futuro `baseline
-migrate` pueda reindexar cada entrada tras una subida de versión del
-algoritmo de huella o un cambio de `rule_id` en una herramienta, en vez de
-que la entrada quede huérfana e irrecuperable.
+comando — porque el ADR (§8.2) los exige para que `linceo baseline migrate`
+(ver más abajo, "Manteniendo el baseline") pueda reindexar cada entrada tras
+una subida de versión del algoritmo de huella o un cambio de `rule_id` en
+una herramienta, en vez de que la entrada quede huérfana e irrecuperable.
 
 #### El vencimiento se escalona por severidad, nunca es una sola fecha
 
@@ -186,6 +186,132 @@ Esta es la configuración final que un repositorio adoptante mantiene en el
 tiempo. Las dos etapas anteriores no se "cierran" formalmente — simplemente
 dejan de ser necesarias una vez que el archivo de política expresa la
 intención real del equipo en vez de ser un artefacto de transición.
+
+## Manteniendo el baseline: `linceo baseline migrate`
+
+**El problema que resuelve.** El `fingerprint` de un hallazgo lleva la
+versión del algoritmo que lo produjo embebida en el propio valor
+(`v1:...`, ADR §5) — a propósito: así una huella `v2` nunca puede coincidir
+por accidente con una `v1`. La contraparte de esa decisión es que, el día
+que esa versión suba — un cambio incompatible, documentado con nota de
+migración obligatoria, nunca silencioso —, cada entrada `[[exclusions]]`
+de cada repositorio que usa `linceo` queda huérfana de golpe: su
+`fingerprint` deja de coincidir con nada, y sin un mecanismo de
+recuperación la única salida sería regenerar el baseline entero desde
+cero, perdiendo el `reason`/`owner`/`expires_at` que cada entrada ya tenía
+y volviendo a poner en pantalla, de golpe, toda la deuda que el baseline
+existía para mantener ordenada. `linceo baseline migrate` (ADR §8.2)
+existe exactamente para evitar eso — y, sin proponérselo como un
+mecanismo aparte, también recupera el caso en que una herramienta
+simplemente le cambia el nombre a una regla entre versiones (ADR §5): el
+`fingerprint` de esa entrada seguiría siendo técnicamente "v1", pero ya no
+coincidiría con ningún hallazgo real, exactamente el mismo síntoma que
+una subida de versión.
+
+Igual que `baseline init` frente a un destino que ya existe, pide
+confirmación explícita antes de tocar el archivo — mostrando primero un
+**plan**, en futuro, de lo que va a hacer:
+
+```bash
+linceo baseline migrate
+```
+
+```
+.devsecops/config.toml: 6 exclusion(s) already on v1, 2 would be
+reindexed, 1 unresolved, 0 out of scope for this repository.
+
+Would reindex:
+  - v0:9c4e0a71cc31 -> v1:2b6f5a10e488 owner=team-atlas
+    expires_at=2026-11-06
+  - v0:1b77de02a94f -> v1:e41b6d3c9f2a (rule_id renamed:
+    'generic-api-key' -> 'aws-access-token') owner=team-atlas
+    expires_at=2026-10-22
+
+Unresolved — no current finding's identity matches theirs. The finding
+behind one may have been genuinely fixed, or its identity drifted in a way
+this cannot recover automatically either way — left untouched; review and
+remove, or re-baseline, by hand:
+  - v0:44ffee0012ab category=secrets rule_id='old-rule'
+    path='legacy/config.py' owner=team-atlas reason='Initial adoption
+    baseline — pending real triage' expires_at=2026-10-30
+
+Rewrite these fingerprint(s) in place? [y/N]:
+```
+
+Y, tras confirmar y escribir, un **resultado** distinto, en pasado, que
+nombra el archivo efectivamente modificado — nunca el mismo texto del plan
+repetido:
+
+```
+Reindexed 2 exclusion(s) in .devsecops/config.toml (6 already on v1, left
+unchanged), 1 unresolved, 0 out of scope for this repository.
+
+Reindexed:
+  - v0:9c4e0a71cc31 -> v1:2b6f5a10e488 owner=team-atlas
+    expires_at=2026-11-06
+  - v0:1b77de02a94f -> v1:e41b6d3c9f2a (rule_id renamed:
+    'generic-api-key' -> 'aws-access-token') owner=team-atlas
+    expires_at=2026-10-22
+
+Unresolved — no current finding's identity matches theirs. [...]
+```
+
+`--force` (para un script o un paso de pipeline) salta la pregunta y el
+plan por completo — solo imprime el resultado, una vez.
+
+**Cómo reindexa.** Para cada entrada cuyo `fingerprint` no está en la
+versión vigente, corre gitleaks y trivy de verdad contra el estado actual
+del repositorio (el mismo run que usa `baseline init`) y busca, entre los
+hallazgos activos de esa corrida, uno cuya identidad legible coincida —
+primero por identidad completa (`category`, `rule_id`, `path`, y para
+`sca` `package`/`package_version`), y solo si eso no encuentra nada, por
+esa misma identidad sin `rule_id`, que es lo que recupera el caso de
+renombrado. Si más de un hallazgo activo comparte esa identidad reducida
+— dos CVE distintos sobre el mismo paquete y versión, por ejemplo — el
+comando **no adivina**: dejar la entrada huérfana y visible en el reporte
+es preferible a reindexarla sobre el hallazgo equivocado. `reason`,
+`owner`, `expires_at`, y el alcance (`repositories`) de la entrada
+original viajan intactos a la entrada migrada — migrar no es renovar la
+deuda, es mantenerla apuntando a donde corresponde.
+
+**Las "Unresolved" no se descartan — se reportan para que alguien
+decida.** Una entrada que no encuentra correspondencia puede significar
+dos cosas muy distintas, y el comando no intenta adivinar cuál: que el
+hallazgo detrás ya se corrigió de verdad (buena noticia — la entrada ya
+no hace falta, se puede borrar a mano), o que su identidad cambió de una
+forma que este mecanismo no puede recuperar solo (por ejemplo, el
+archivo se movió de sitio además de que la regla cambió de nombre). El
+reporte imprime la identidad completa de cada una — huella, categoría,
+regla, ruta, dueño, motivo, vencimiento — con exactamente los datos que
+hacen falta para decidir a mano sin tener que ir a buscar el archivo.
+
+**El alcance por repositorio se respeta también aquí.** Una entrada con
+`repositories` que no incluye el repositorio actual (ADR §8, "Alcance de
+las exclusiones") se deja intacta y aparece como "out of scope" en vez de
+intentarse — este run no tiene evidencia de ningún otro repositorio
+contra la cual reindexarla, y adivinar sería exactamente el tipo de
+adivinanza que el resto del comando se niega a hacer.
+
+**Mismo patrón atómico y el mismo respeto por lo demás que ya vive en el
+archivo, que `baseline init`.** Solo se reescriben, en el propio texto
+crudo del archivo, los valores de `fingerprint` (siempre) y `rule_id`
+(solo cuando el renombrado es lo que recuperó la entrada) de las entradas
+efectivamente migradas — nunca una re-renderización completa del
+documento: `[thresholds]`, `[tool_defaults]`/`[tools.<nombre>]`,
+cualquier comentario, y toda entrada que no cambió (incluidas las que
+quedan sin resolver) sobreviven byte a byte. La escritura pasa por un
+archivo temporal, se valida releyéndola con el mismo cargador de
+configuración que usa cualquier otro comando, y solo entonces se mueve al
+destino final — si algo falla a mitad de camino, el archivo original
+queda exactamente como estaba, nunca a medio escribir.
+
+**Cuándo correrlo.** No es parte del flujo normal de adopción de las tres
+etapas de arriba — hace falta únicamente cuando el registro de cambios
+del propio `linceo` anuncia una subida de la versión del algoritmo de
+huella, o cuando alguien nota que una herramienta integrada renombró una
+de sus reglas entre dos versiones ancladas. `linceo baseline migrate` sin
+argumentos, contra el mismo `.devsecops/config.toml` que ya usa el
+repositorio, es el único paso que hace falta.
 
 ## Por qué encender el modo bloqueante desde el día uno es la forma más rápida de perder el scanner
 

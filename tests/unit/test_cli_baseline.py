@@ -12,7 +12,7 @@ from __future__ import annotations
 import subprocess
 import tomllib
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -599,9 +599,422 @@ def test_expires_in_days_at_or_beyond_the_horizon_is_a_configuration_error(
     assert not (repo / ".devsecops").exists()
 
 
+# --- baseline migrate (ADR §8.2, §5) ------------------------------------------
+
+
+def test_migrate_with_no_existing_file_is_a_noop(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo)])
+
+    assert result.exit_code == EXIT_OK
+    assert "Nothing to migrate" in result.output
+    assert not (repo / ".devsecops").exists()
+
+
+def test_migrate_with_only_current_version_exclusions_is_a_noop(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    content = (
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v1:preexisting0000000000000000000000000000000000000000000000000000"\n'
+        'reason = "Accepted risk"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+    )
+    output_path.write_text(content, encoding="utf-8")
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo)])
+
+    assert result.exit_code == EXIT_OK
+    assert "already on v1" in result.output
+    assert output_path.read_text(encoding="utf-8") == content
+
+
+def test_migrate_reindexes_an_orphaned_entry_preserving_reason_owner_and_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text(
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v0:deadbeef"\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'category = "secrets"\n'
+        'rule_id = "aws-access-token"\n'
+        'path = "config.py"\n',
+        encoding="utf-8",
+    )
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo), "--force"])
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert f"Reindexed 1 exclusion(s) in {output_path}" in result.output
+    document = tomllib.loads(output_path.read_text(encoding="utf-8"))
+    entry = document["exclusions"][0]
+    assert entry["fingerprint"].startswith("v1:")
+    assert entry["fingerprint"] != "v0:deadbeef"
+    assert entry["reason"] == "Migrating from an older scanner"
+    assert entry["owner"] == "team-atlas"
+    assert entry["expires_at"] == date(2026, 12, 1)
+
+
+def test_migrate_prints_a_future_tense_plan_then_a_past_tense_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plan (shown before confirming) and the result (shown after writing) must read as
+    two distinct moments, never the same text printed twice."""
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text(
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v0:deadbeef"\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'category = "secrets"\n'
+        'rule_id = "aws-access-token"\n'
+        'path = "config.py"\n',
+        encoding="utf-8",
+    )
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo)], input="y\n")
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "1 would be reindexed" in result.output
+    assert f"Reindexed 1 exclusion(s) in {output_path}" in result.output
+    assert result.output.count("would be reindexed") == 1
+    assert result.output.count("Reindexed 1 exclusion(s)") == 1
+
+
+def test_migrate_with_force_prints_only_the_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text(
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v0:deadbeef"\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'category = "secrets"\n'
+        'rule_id = "aws-access-token"\n'
+        'path = "config.py"\n',
+        encoding="utf-8",
+    )
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo), "--force"])
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "would be reindexed" not in result.output
+    assert f"Reindexed 1 exclusion(s) in {output_path}" in result.output
+
+
+def test_migrate_recovers_a_renamed_rule_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR §5: the same mechanism recovers a tool renaming its `rule_id` between versions."""
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text(
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v0:deadbeef"\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'category = "secrets"\n'
+        'rule_id = "aws-access-key-legacy"\n'  # the tool's old name for this rule
+        'path = "config.py"\n',
+        encoding="utf-8",
+    )
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo), "--force"])
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "rule_id renamed" in result.output
+    document = tomllib.loads(output_path.read_text(encoding="utf-8"))
+    entry = document["exclusions"][0]
+    assert entry["fingerprint"].startswith("v1:")
+    assert entry["rule_id"] == "aws-access-token"
+
+
+def test_migrate_leaves_an_unresolved_entry_untouched_and_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    original_content = (
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v0:deadbeef"\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'category = "secrets"\n'
+        'rule_id = "aws-access-token"\n'
+        'path = "no-longer-there.py"\n'
+    )
+    output_path.write_text(original_content, encoding="utf-8")
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo), "--force"])
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "Unresolved" in result.output
+    assert "v0:deadbeef" in result.output
+    assert output_path.read_text(encoding="utf-8") == original_content
+
+
+def test_migrate_leaves_an_out_of_scope_entry_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    original_content = (
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v0:deadbeef"\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'repositories = ["some-other-repo"]\n'
+        'category = "secrets"\n'
+        'rule_id = "aws-access-token"\n'
+        'path = "config.py"\n'
+    )
+    output_path.write_text(original_content, encoding="utf-8")
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo), "--force"])
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "out of scope" in result.output
+    assert output_path.read_text(encoding="utf-8") == original_content
+
+
+def test_migrate_preserves_everything_else_in_the_document_byte_for_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text(
+        "version = 1\n"
+        "\n"
+        "# A hand-written comment that must survive untouched.\n"
+        "[thresholds]\n"
+        "critical = 0\n"
+        "high = 0\n"
+        "\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v1:preexisting0000000000000000000000000000000000000000000000000000"\n'
+        'reason = "Pre-existing, hand-curated exclusion"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        "\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v0:deadbeef"\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'category = "secrets"\n'
+        'rule_id = "aws-access-token"\n'
+        'path = "config.py"\n',
+        encoding="utf-8",
+    )
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo), "--force"])
+
+    assert result.exit_code == EXIT_OK, result.output
+    new_text = output_path.read_text(encoding="utf-8")
+    assert "# A hand-written comment that must survive untouched.\n[thresholds]" in new_text
+    assert "critical = 0\nhigh = 0" in new_text
+    assert (
+        'fingerprint = "v1:preexisting0000000000000000000000000000000000000000000000000000"'
+        in new_text
+    )
+    assert 'reason = "Pre-existing, hand-curated exclusion"' in new_text
+    assert 'fingerprint = "v0:deadbeef"' not in new_text
+
+
+def test_migrate_refuses_when_the_scan_has_incomplete_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    original_content = (
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v0:deadbeef"\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'category = "secrets"\n'
+        'rule_id = "aws-access-token"\n'
+        'path = "config.py"\n'
+    )
+    output_path.write_text(original_content, encoding="utf-8")
+    _patch_executor(
+        monkeypatch,
+        {
+            ("trivy", "version", "--format", "json"): _TRIVY_VERSION_RESULT,
+            ("trivy", "fs"): ProcessResult(
+                exit_code=0,
+                stdout=(_TRIVY_FIXTURES / "empty.json").read_text(encoding="utf-8"),
+                stderr="",
+                started_at=_NOW,
+                finished_at=_NOW,
+            ),
+        },
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo), "--force"])
+
+    assert result.exit_code == EXIT_TOOL_EXECUTION_FAILED
+    assert "incomplete evidence" in result.output
+    assert output_path.read_text(encoding="utf-8") == original_content
+
+
+def test_migrate_with_no_exclusions_declared_is_a_noop(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    content = "version = 1\n\n[thresholds]\nhigh = 0\n"
+    output_path.write_text(content, encoding="utf-8")
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo)])
+
+    assert result.exit_code == EXIT_OK
+    assert "declares no exclusions" in result.output
+    assert output_path.read_text(encoding="utf-8") == content
+
+
+def test_migrate_with_an_invalid_existing_document_is_a_configuration_error(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    content = "version = 1\nbogus_top_level_field = true\n"
+    output_path.write_text(content, encoding="utf-8")
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo)])
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "not a valid policy document" in result.output
+    assert output_path.read_text(encoding="utf-8") == content
+
+
+def test_migrate_refuses_and_leaves_the_file_untouched_when_it_cannot_locate_the_exact_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-edited entry using a triple-quoted string is unusual but valid TOML — the
+    surgical replace only knows single-line basic/literal strings, so it must refuse rather
+    than guess, and the atomic-write discipline must leave the file exactly as it was."""
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    original_content = (
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = """v0:deadbeef"""\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'category = "secrets"\n'
+        'rule_id = "aws-access-token"\n'
+        'path = "config.py"\n'
+    )
+    output_path.write_text(original_content, encoding="utf-8")
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo), "--force"])
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "could not locate the exact text to update" in result.output
+    assert output_path.read_text(encoding="utf-8") == original_content
+    assert not (repo / ".devsecops" / "config.toml.tmp").exists()
+
+
+def test_migrate_declining_the_confirmation_aborts_without_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "widgets")
+    output_path = repo / ".devsecops" / "config.toml"
+    output_path.parent.mkdir(parents=True)
+    original_content = (
+        "version = 1\n\n"
+        "[[exclusions]]\n"
+        'fingerprint = "v0:deadbeef"\n'
+        'reason = "Migrating from an older scanner"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-12-01\n"
+        'category = "secrets"\n'
+        'rule_id = "aws-access-token"\n'
+        'path = "config.py"\n'
+    )
+    output_path.write_text(original_content, encoding="utf-8")
+    _patch_executor(
+        monkeypatch,
+        _findings_recordings(gitleaks_fixture="one_finding.json", trivy_fixture="empty.json"),
+    )
+
+    result = runner.invoke(app, ["baseline", "migrate", "--path", str(repo)], input="n\n")
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "Aborted" in result.output
+    assert output_path.read_text(encoding="utf-8") == original_content
+
+
 def test_baseline_init_is_listed_in_help() -> None:
     root_help = runner.invoke(app, ["--help"])
     baseline_help = runner.invoke(app, ["baseline", "--help"])
 
     assert "baseline" in root_help.output
     assert "init" in baseline_help.output
+    assert "migrate" in baseline_help.output

@@ -7,14 +7,17 @@ from datetime import date, timedelta
 
 import pytest
 
-from linceo.core.findings import Category, Finding, Location
+from linceo.core.findings import Category, Finding, Location, Package
+from linceo.core.fingerprint import sca_fingerprint, secret_fingerprint
 from linceo.core.policy import (
     Exclusion,
     PolicyConfigurationError,
     ToolSkip,
     apply_exclusions,
     baseline_wave_expiry,
+    is_current_fingerprint,
     parse_policy_document,
+    plan_baseline_migration,
     render_exclusion_fragment,
     render_exclusions_toml,
     split_tool_skips,
@@ -842,3 +845,256 @@ def test_baseline_wave_expiry_with_a_tight_span_still_returns_a_valid_date() -> 
             max_expiry_days=32,
         )
         assert TODAY + timedelta(days=30) <= expiry <= TODAY + timedelta(days=32)
+
+
+# --- plan_baseline_migration (ADR §8.2, §5) ---------------------------------
+
+
+def _secret_finding(
+    *, rule_id: str = "aws-access-token", path: str = "config.py", secret_hash: str = _SECRET_HASH
+) -> Finding:
+    return Finding(
+        fingerprint=secret_fingerprint(rule_id=rule_id, path=path, secret_hash=secret_hash),
+        tool="gitleaks",
+        category=Category.SECRETS,
+        rule_id=rule_id,
+        message="AWS access key detected",
+        location=Location(path=path),
+        severity=Severity.HIGH,
+        raw_severity=None,
+        severity_source=SeveritySource.CATEGORY_DEFAULT,
+        secret_hash=secret_hash,
+    )
+
+
+def _sca_finding(
+    *,
+    rule_id: str = "CVE-2023-37920",
+    path: str = "requirements.txt",
+    package: str = "certifi",
+    package_version: str = "2015.4.28",
+) -> Finding:
+    return Finding(
+        fingerprint=sca_fingerprint(
+            package_name=package,
+            package_version=package_version,
+            vulnerability_id=rule_id,
+            manifest_path=path,
+        ),
+        tool="trivy",
+        category=Category.SCA,
+        rule_id=rule_id,
+        message="Vulnerable dependency detected",
+        location=Location(path=path),
+        severity=Severity.HIGH,
+        raw_severity="HIGH",
+        severity_source=SeveritySource.NATIVE,
+        package=Package(name=package, version=package_version),
+    )
+
+
+def _orphaned_exclusion(
+    *,
+    fingerprint: str = "v0:deadbeef",
+    category: Category | None = Category.SECRETS,
+    rule_id: str | None = "aws-access-token",
+    path: str | None = "config.py",
+    package: str | None = None,
+    package_version: str | None = None,
+    reason: str = "Initial adoption baseline — pending real triage",
+    owner: str = "alice",
+    expires_at: date | None = None,
+    repositories: tuple[str, ...] = (),
+) -> Exclusion:
+    """A synthetic orphaned entry (pre-`v1` fingerprint) with the given identity fields."""
+    return Exclusion(
+        fingerprint=fingerprint,
+        reason=reason,
+        owner=owner,
+        expires_at=expires_at or TODAY + timedelta(days=30),
+        repositories=repositories,
+        category=category,
+        rule_id=rule_id,
+        path=path,
+        package=package,
+        package_version=package_version,
+    )
+
+
+def test_is_current_fingerprint_checks_the_version_prefix() -> None:
+    assert is_current_fingerprint("v1:abc") is True
+    assert is_current_fingerprint("v0:abc") is False
+    assert is_current_fingerprint("not-a-fingerprint") is False
+
+
+def test_current_version_exclusion_is_left_unchanged() -> None:
+    finding = _secret_finding()
+    entry = Exclusion(
+        fingerprint=finding.fingerprint,
+        reason="adoption",
+        owner="alice",
+        expires_at=TODAY + timedelta(days=30),
+        category=Category.SECRETS,
+        rule_id=finding.rule_id,
+        path=finding.location.path,
+    )
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.unchanged == (entry,)
+    assert plan.migrated == ()
+    assert plan.unresolved == ()
+    assert plan.out_of_scope == ()
+
+
+def test_orphaned_exclusion_with_matching_identity_is_reindexed() -> None:
+    finding = _secret_finding()
+    entry = _orphaned_exclusion()
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.unresolved == ()
+    assert len(plan.migrated) == 1
+    migration = plan.migrated[0]
+    assert migration.original is entry
+    assert migration.migrated.fingerprint == finding.fingerprint
+    assert is_current_fingerprint(migration.migrated.fingerprint)
+
+
+def test_migration_preserves_reason_owner_expires_at_and_repositories() -> None:
+    finding = _secret_finding()
+    expires_at = TODAY + timedelta(days=17)
+    entry = _orphaned_exclusion(
+        reason="Migrating from an older scanner",
+        owner="team-atlas",
+        expires_at=expires_at,
+        repositories=("orion-web", "orion-api"),
+    )
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    migrated = plan.migrated[0].migrated
+    assert migrated.reason == "Migrating from an older scanner"
+    assert migrated.owner == "team-atlas"
+    assert migrated.expires_at == expires_at
+    assert migrated.repositories == ("orion-web", "orion-api")
+
+
+def test_orphaned_exclusion_with_renamed_rule_id_is_still_reindexed() -> None:
+    """ADR §5: a tool renaming its `rule_id` between versions, covered without a special case."""
+    finding = _secret_finding(rule_id="aws-access-token")
+    entry = _orphaned_exclusion(rule_id="aws-access-key-legacy")  # the tool's old name for it
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.unresolved == ()
+    migrated = plan.migrated[0].migrated
+    assert migrated.rule_id == "aws-access-token"
+    assert migrated.fingerprint == finding.fingerprint
+
+
+def test_orphaned_exclusion_with_no_match_is_unresolved() -> None:
+    finding = _secret_finding(path="other.py")
+    entry = _orphaned_exclusion(path="config.py")
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.migrated == ()
+    assert plan.unresolved == (entry,)
+
+
+def test_ambiguous_identity_without_rule_id_is_left_unresolved() -> None:
+    """Two current findings share everything but `rule_id` — dropping it must never guess."""
+    first = _secret_finding(rule_id="rule-a", path="config.py")
+    second = _secret_finding(rule_id="rule-b", path="config.py", secret_hash="cafebabe")  # noqa: S106
+    entry = _orphaned_exclusion(rule_id="rule-old", path="config.py")
+
+    plan = plan_baseline_migration((entry,), (first, second), repository=_REPOSITORY)
+
+    assert plan.migrated == ()
+    assert plan.unresolved == (entry,)
+
+
+def test_a_claimed_finding_is_not_reused_for_an_orphaned_entry() -> None:
+    finding = _secret_finding()
+    current_entry = Exclusion(
+        fingerprint=finding.fingerprint,
+        reason="existing",
+        owner="bob",
+        expires_at=TODAY + timedelta(days=10),
+    )
+    orphaned_entry = _orphaned_exclusion()
+
+    plan = plan_baseline_migration(
+        (current_entry, orphaned_entry), (finding,), repository=_REPOSITORY
+    )
+
+    assert plan.unchanged == (current_entry,)
+    assert plan.migrated == ()
+    assert plan.unresolved == (orphaned_entry,)
+
+
+def test_two_orphaned_entries_matching_the_same_finding_only_the_first_is_migrated() -> None:
+    finding = _secret_finding()
+    first = _orphaned_exclusion(fingerprint="v0:first", owner="alice")
+    second = _orphaned_exclusion(fingerprint="v0:second", owner="bob")
+
+    plan = plan_baseline_migration((first, second), (finding,), repository=_REPOSITORY)
+
+    assert len(plan.migrated) == 1
+    assert plan.migrated[0].original is first
+    assert plan.unresolved == (second,)
+
+
+def test_out_of_scope_exclusion_is_left_untouched() -> None:
+    finding = _secret_finding()
+    entry = _orphaned_exclusion(repositories=("other-repo",))
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.migrated == ()
+    assert plan.unresolved == ()
+    assert plan.out_of_scope == (entry,)
+
+
+def test_sca_identity_matches_on_package_and_version_too() -> None:
+    finding = _sca_finding()
+    entry = _orphaned_exclusion(
+        category=Category.SCA,
+        rule_id="CVE-2023-37920",
+        path="requirements.txt",
+        package="certifi",
+        package_version="2015.4.28",
+    )
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.migrated[0].migrated.fingerprint == finding.fingerprint
+
+
+def test_sca_finding_with_a_different_installed_version_does_not_match() -> None:
+    """A genuine upgrade changes `package_version` — not the same finding, must not merge."""
+    finding = _sca_finding(package_version="2023.7.22")
+    entry = _orphaned_exclusion(
+        category=Category.SCA,
+        rule_id="CVE-2023-37920",
+        path="requirements.txt",
+        package="certifi",
+        package_version="2015.4.28",
+    )
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.migrated == ()
+    assert plan.unresolved == (entry,)
+
+
+def test_an_entry_with_no_identity_fields_at_all_is_unresolved() -> None:
+    """A hand-written entry naming just a fingerprint has nothing for migrate to reindex by."""
+    finding = _secret_finding()
+    entry = Exclusion(fingerprint="v0:deadbeef", reason="adoption", owner="alice", expires_at=TODAY)
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.migrated == ()
+    assert plan.unresolved == (entry,)
