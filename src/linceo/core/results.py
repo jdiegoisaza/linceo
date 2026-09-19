@@ -14,7 +14,7 @@ from enum import StrEnum
 
 from linceo.core.context import ExecutionContext
 from linceo.core.execution import ToolExecution
-from linceo.core.findings import Finding
+from linceo.core.findings import Category, Finding
 from linceo.core.policy import Exclusion, ThresholdResolution, ToolSkip
 from linceo.core.severity import Severity
 
@@ -37,8 +37,15 @@ class RunStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ThresholdBreach:
-    """One severity whose active finding count exceeds its configured maximum (ADR §8.1)."""
+    """One category/severity pair whose active finding count exceeds its configured maximum.
 
+    `category` is always the specific category this breach's counts and
+    maximum came from — never a run-wide aggregate — since ADR §8.1's
+    per-category thresholds mean two categories can breach independently,
+    with different maximums, over the same run.
+    """
+
+    category: Category
     severity: Severity
     count: int
     maximum: int
@@ -62,10 +69,18 @@ class Verdict:
     evidence exists, but a report must never render it as `PASSED`: the
     gate was not evaluated over complete evidence, only over what was
     available (ADR §5).
+
+    `counts_by_category` is what the gate actually evaluates against
+    (ADR §8.1): each category's active findings, counted by severity,
+    independently of every other category. `counts_by_severity` is the
+    same findings pooled across categories into one flat summary — never
+    used for gate evaluation itself, only for the run-wide count a report
+    or a consumer that does not care about per-category thresholds wants.
     """
 
     resolution: ThresholdResolution
     counts_by_severity: Mapping[Severity, int]
+    counts_by_category: Mapping[Category, Mapping[Severity, int]]
     breaches: tuple[ThresholdBreach, ...]
     passed: bool
 

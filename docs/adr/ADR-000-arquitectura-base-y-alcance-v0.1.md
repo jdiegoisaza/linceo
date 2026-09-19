@@ -780,16 +780,25 @@ sobre casos que pueden ser benignos.
 
 ### La escala normalizada es el espacio de claves de los umbrales del gate
 
-El gate (§8.1) no tiene su propio vocabulario de severidad: sus umbrales —tanto el
-`--fail-on` plano como la tabla `[thresholds]` de un archivo de política (§8.4)— se
-declaran exclusivamente sobre los cinco niveles de esta sección. Eso hace concreta, y
-verificable en carga en vez de solo aspiracional, la frase ya escrita arriba: **`INFO`
-nunca bloquea el gate, bajo ninguna configuración de umbral**. Antes de esta revisión
-del contrato, `--fail-on info` se aceptaba en el CLI sin producir jamás un
-incumplimiento — una promesa que dependía de que nadie probara el caso. Ahora,
-`INFO` como cutoff o como clave de `[thresholds]` es directamente **error de
+El gate (§8.1) no tiene su propio vocabulario de severidad: sus umbrales —el
+`--fail-on` plano, la tabla `[thresholds]` de un archivo de política, y cualquier
+tabla `[thresholds.<categoría>]` que especialice una categoría concreta (§8.1,
+§8.4)— se declaran exclusivamente sobre los cinco niveles de esta sección, sin
+excepción para ninguna de las tres formas. Eso hace concreta, y verificable en carga
+en vez de solo aspiracional, la frase ya escrita arriba: **`INFO` nunca bloquea el
+gate, bajo ninguna configuración de umbral**. Antes de esta revisión del contrato,
+`--fail-on info` se aceptaba en el CLI sin producir jamás un incumplimiento — una
+promesa que dependía de que nadie probara el caso. Ahora, `INFO` como cutoff o como
+clave de `[thresholds]` — global o de una categoría — es directamente **error de
 configuración** (código de salida 2, §8): la única forma de que la garantía de esta
-sección deje de ser una promesa y pase a ser un invariante comprobado.
+sección deje de ser una promesa y pase a ser un invariante comprobado. Especializar
+los umbrales por categoría generaliza *dónde* se declara un umbral, nunca *sobre qué
+vocabulario* se declara — introducir una sexta clave, o una escala paralela propia de
+una categoría, habría roto esta sección precisamente donde más importa que no se
+rompa: la razón por la que `--fail-on HIGH` significa lo mismo sin importar qué
+herramienta produjo el hallazgo (motivo de apertura de esta sección) se aplicaría
+distinto según la categoría si cada una tuviera su propio vocabulario de severidad,
+en vez de solo su propio umbral sobre el vocabulario compartido.
 
 ### Verificación
 
@@ -954,8 +963,12 @@ detecta entonces, en vez de fallar en silencio.
   política (§5, §8.4) se destacan en su propia línea, con herramienta, responsable y
   fecha límite.
 - **Desvío de política:** cuando un flag o variable de entorno reemplaza por completo
-  la tabla `[thresholds]` declarada en el archivo de política (§8.1, §8.4), el reporte
-  lo anuncia en una línea explícita, antes del veredicto — nunca en silencio.
+  la tabla `[thresholds]` declarada en el archivo de política —o cualquier
+  `[thresholds.<categoría>]`— (§8.1, §8.4), el reporte lo anuncia en una línea
+  explícita, antes del veredicto, nombrando cada tabla reemplazada — nunca en
+  silencio. Cuando el gate sí está activo, el reporte nombra además, para cada
+  categoría que corrió, de qué tabla salió el umbral que se le aplicó — su propia
+  `[thresholds.<categoría>]` o el `[thresholds]` por defecto (§8.1).
 
 ---
 
@@ -1103,6 +1116,122 @@ el mecanismo que ganó y lo que la política del archivo declaraba y perdió —
 que se desvía en silencio de la política que un repositorio declaró perdería la
 confianza de quien la escribió, y ese costo es estrictamente mayor que el de una línea
 de aviso.
+
+#### Umbrales por categoría: `[thresholds.<categoría>]`
+
+**El problema, encontrado en uso real:** `[thresholds]` es una única tabla, aplicada
+igual a cualquier categoría que corra en el run. Cuatro secretos expuestos es grave;
+ocho CVE `HIGH` en dependencias transitivas es un martes cualquiera para muchos
+equipos. Con una sola tabla, el operador elige entre ser demasiado estricto con `sca`
+o demasiado laxo con `secrets` — o mantener dos documentos de política distintos
+(rompiendo la premisa de §8.5 de que es "un documento por repositorio, no por
+invocación"), o sobrescribir con `--fail-on` en cada paso del pipeline, perdiendo con
+ello la tabla `[thresholds]` entera en vez de solo el ajuste que quería hacer (ver
+más arriba en esta misma sección).
+
+**Decisión: `[thresholds.<categoría>]` convive con `[thresholds]`, sin fusión de
+campos entre ambos — full esquema en §8.4.**
+
+```toml
+[thresholds]             # aplica a cualquier categoría sin tabla propia
+high = 5
+
+[thresholds.secrets]     # reemplaza [thresholds] por completo para "secrets"
+critical = 0
+high = 0
+
+[thresholds.sca]         # reemplaza [thresholds] por completo para "sca"
+high = 5
+medium = 25
+```
+
+En este ejemplo, `secrets` nunca ve el `high = 5` de `[thresholds]` — su propia
+tabla dice `high = 0` y esa es toda la historia para esa categoría. `sca` declara
+también su propia tabla, así que tampoco consulta `[thresholds]`; el bloque global
+solo entra en juego para una categoría que no declaró ninguna tabla propia.
+
+**Precedencia elegida: reemplazo del bloque entero, nunca merge campo por campo —
+con un criterio explícito, no una elección arbitraria entre los dos precedentes que
+ya existen en este documento:**
+
+- `--fail-on` ya reemplaza `[thresholds]` por completo (más arriba en esta misma
+  sección): un flag no edita parcialmente la intención declarada de un archivo.
+- `[tool_defaults]` frente a `[tools.<nombre>]` (§8.5), en cambio, sí mezclan campo
+  por campo: cada uno de los cuatro campos de nivel 1 (`exclude_paths`,
+  `scan_history`, `custom_rules_path`, `timeout`) es una perilla de comportamiento
+  independiente, sin relación entre sí — fijar `timeout` en `[tools.gitleaks]` no
+  dice nada sobre qué debería pasar con `exclude_paths`, así que no hay pérdida de
+  legibilidad en dejar que cada campo se resuelva por su cuenta.
+
+Una tabla de umbrales no tiene esa propiedad: sus claves — las severidades de §6 —
+no son perillas independientes, son las piezas de un mismo perfil de riesgo
+declarado como conjunto. Si `[thresholds.secrets]` fijara solo `high = 0` y heredara
+`medium` de `[thresholds]` por mezcla campo por campo, quien lee
+`[thresholds.secrets]` no podría responder "¿qué bloquea a `secrets`?" mirando solo
+ese bloque — tendría que revisar `[thresholds]` también, exactamente el problema que
+el párrafo anterior ya resolvió una vez para `--fail-on` frente a `[thresholds]`
+("alguien depurando un pipeline tendría que reconstruir mentalmente qué severidad
+vino de dónde"). Copiar el criterio de §8.5 aquí reintroduciría, para categorías, el
+mismo defecto que copiar el criterio de `--fail-on` evita — de ahí que la elección
+correcta no sea "aplicar siempre merge" ni "aplicar siempre reemplazo", sino mirar si
+las claves del bloque son perillas independientes (§8.5) o un perfil declarado como
+conjunto (aquí y en `--fail-on`/`[thresholds]`). Por eso el reemplazo entero: la
+respuesta a "qué bloquea a `secrets`" siempre está completa en un único bloque — el
+suyo propio si existe, o si no, `[thresholds]`.
+
+**El precio, dicho explícitamente:** un documento que declara `[thresholds.secrets]`
+con solo `high = 0` dice, para `secrets`, que `medium` es *ilimitado* — no hereda el
+`medium = 25` de `[thresholds]` aunque a primera vista pudiera parecer razonable que
+lo hiciera. Quien escribe una tabla de categoría se compromete a declarar en ella
+todo lo que quiere limitar para esa categoría, sin dar nada por sentado del bloque
+global. Se acepta este precio por la misma razón que se acepta en `--fail-on` frente
+a `[thresholds]`: una respuesta completa en una sola fuente vale más que ahorrarse
+repetir una clave.
+
+**`--fail-on` (CLI o `LINCEO_FAIL_ON`) sigue reemplazando todo — ahora "todo" incluye
+las tablas de categoría.** El flag es, por diseño, ciego a la categoría — el mismo
+punto de corte para cualquier hallazgo — así que cuando gana, reemplaza tanto
+`[thresholds]` como cualquier `[thresholds.<categoría>]` que el archivo declarara;
+nunca dejaría, por ejemplo, la tabla de `secrets` vigente mientras reemplaza solo la
+de `sca`. El reporte anuncia el reemplazo nombrando cada tabla reemplazada por
+separado (`[thresholds]` y cada `[thresholds.<categoría>]` con contenido propio),
+extendiendo el mismo mecanismo de anuncio que este documento ya exige para el caso
+de una sola tabla.
+
+**Una categoría no registrada (`Category`, ADR §5) bajo `[thresholds.<nombre>]` es
+error de configuración, nunca una tabla ignorada en silencio** — el mismo principio
+que ya rige un campo desconocido en cualquier otro punto de este documento (§8.4,
+§8.5): un typo en `[thresholds.secret]` (sin la "s") no debe traducirse en "esta
+categoría queda sin gate", indistinguible en el reporte de un operador que decidió a
+propósito no ponerle umbral.
+
+**El motor no conoce categorías por nombre.** `core.gate` cuenta hallazgos activos
+por categoría y busca, para cada una, la tabla que le corresponde mediante un único
+método (`ThresholdResolution.thresholds_for`) — nunca un condicional por nombre de
+categoría. Añadir una tercera categoría al catálogo de integraciones (§14) no exige
+tocar `core.gate` ni `core.policy`: la categoría nueva obtiene un gate correcto por
+construcción en cuanto existe en `Category`, exactamente como el reporter ya declara
+para sus tablas de columnas (§7, "El reporter no tiene un solo condicional por
+herramienta ni por categoría").
+
+**Cambio de comportamiento, dicho en voz alta:** antes de esta revisión, el gate
+contaba los hallazgos activos de *todas* las categorías de un run agrupados en un
+único conteo por severidad, evaluado contra una sola tabla — dos categorías
+competían por el mismo cupo. Con umbrales por categoría, cada categoría se cuenta y
+se evalúa por separado, incluso cuando ambas caen bajo el mismo `[thresholds]`
+global sin tabla propia. Esto no cambia ningún comportamiento observable del CLI del
+v0.1 hoy — que solo corre una categoría por invocación (§8, "Una categoría por
+invocación en v0.1"), así que nunca hay dos categorías en el mismo run que puedan
+competir por el mismo cupo — pero sí es el comportamiento correcto para cuando esa
+restricción de superficie se levante (§1): un run con `secrets` y `sca` a la vez debe
+evaluar cada categoría contra su propio perfil de riesgo, nunca sumarlas en un
+contador compartido.
+
+**Verificación:** los mismos tests dirigidos por tabla que ya cubren
+`parse_policy_document` (§8.4) se extienden con una tabla de categoría, una categoría
+desconocida, y el caso de reemplazo por `--fail-on`; `core.gate.find_breaches` se
+prueba con dos categorías con tablas distintas en el mismo run para confirmar que
+ninguna interfiere con la otra.
 
 ### §8.2. Baseline y supresiones
 
@@ -1328,11 +1457,19 @@ max_expiry_horizon_days = 90     # horizonte máximo para expires_at, exclusione
 [report]
 max_rows = 20                    # solo consola (§7); JSON y SARIF llevan todo siempre
 
-[thresholds]                     # conteos máximos permitidos por severidad (§8.1)
-critical = 0
+[thresholds]                     # default: aplica a cualquier categoría sin tabla propia (§8.1)
 high = 0
 medium = 25
 # `info` aquí es error de configuración (§6) — nunca un nivel de umbral válido.
+
+[thresholds.secrets]             # reemplaza [thresholds] por completo para "secrets" (§8.1)
+critical = 0
+high = 0
+
+[thresholds.sca]                 # reemplaza [thresholds] por completo para "sca" (§8.1)
+high = 5
+medium = 25
+# `[thresholds.bogus]` sería error de configuración: "bogus" no es una categoría (§5).
 
 [[exclusions]]
 fingerprint = "v1:9c4e0a71…"     # huella completa o prefijo inequívoco (§7, "FP")
@@ -1354,11 +1491,18 @@ owner = "team-atlas"
 expires_at = 2026-10-01          # vencida, la herramienta vuelve a ejecutarse (§5)
 ```
 
-**Umbrales.** Ver §8.1 para la relación completa con `--fail-on`: el archivo puede
-declarar `[thresholds]` directamente, o dejar que un `fail_on` plano (misma capa,
-archivo) se traduzca vía `thresholds_from_fail_on`. Si un documento declara ambos a la
-vez, `[thresholds]` gana — es la declaración más rica del mismo documento, no una
-capa distinta, así que no cuenta como el reemplazo que §8.1 exige anunciar.
+**Umbrales.** Ver §8.1 para la relación completa con `--fail-on`, y su subsección
+"Umbrales por categoría" para la relación entre `[thresholds]` y
+`[thresholds.<categoría>]`: el archivo puede declarar `[thresholds]` directamente
+—como default para cualquier categoría sin tabla propia—, especializar una categoría
+concreta con `[thresholds.<nombre>]` —que reemplaza `[thresholds]` por completo para
+esa categoría, nunca lo mezcla campo por campo—, o dejar que un `fail_on` plano
+(misma capa, archivo) se traduzca vía `thresholds_from_fail_on` cuando no se declara
+ninguna tabla. Si un documento declara `fail_on` junto con `[thresholds]` y/o alguna
+`[thresholds.<nombre>]`, cualquiera de estas tablas gana sobre el `fail_on` plano —es
+la declaración más rica del mismo documento, no una capa distinta, así que no cuenta
+como el reemplazo que §8.1 exige anunciar. El reporte, en todo caso, nombra de qué
+tabla salió el umbral efectivamente aplicado a cada categoría que corrió (§7, §8.1).
 
 **Exclusiones.** Los campos son exactamente los que §8.2 ya exigía —`fingerprint`,
 `reason`, `owner`, `expires_at` obligatorio— más `repositories` para el alcance,

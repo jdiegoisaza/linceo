@@ -13,6 +13,7 @@ from linceo.core.config import (
     candidate_config_paths,
     load_config,
 )
+from linceo.core.findings import Category
 from linceo.core.policy import ConfigLayer
 from linceo.core.severity import Severity
 from linceo.core.tool_config import ToolConfig
@@ -472,6 +473,130 @@ def test_thresholds_table_naming_info_is_a_configuration_error(tmp_path: Path) -
     (config_dir / "config.toml").write_text("[thresholds]\ninfo = 0\n")
 
     with pytest.raises(ConfigurationError, match="INFO"):
+        load_config(
+            explicit_config_path=None,
+            workspace_path=str(tmp_path),
+            package_root=str(tmp_path / "package"),
+            today=TODAY,
+        )
+
+
+# --- per-category thresholds and their interaction with fail_on (ADR §8.1) ---
+
+
+def test_category_threshold_table_is_used_for_that_category_only(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[thresholds]\nhigh = 5\n\n"
+        "[thresholds.secrets]\ncritical = 0\nhigh = 0\n\n"
+        "[thresholds.sca]\nhigh = 5\nmedium = 25\n"
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    resolution = config.threshold_resolution
+    assert resolution.thresholds == {Severity.HIGH: 5}
+    assert resolution.category_thresholds == {
+        Category.SECRETS: {Severity.CRITICAL: 0, Severity.HIGH: 0},
+        Category.SCA: {Severity.HIGH: 5, Severity.MEDIUM: 25},
+    }
+    assert resolution.thresholds_for(Category.SECRETS) == {Severity.CRITICAL: 0, Severity.HIGH: 0}
+    assert resolution.thresholds_for(Category.SCA) == {Severity.HIGH: 5, Severity.MEDIUM: 25}
+
+
+def test_a_category_with_its_own_table_never_falls_back_to_the_default(tmp_path: Path) -> None:
+    """A category's own table replaces the default entirely — never merges field by field."""
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[thresholds]\nmedium = 25\n\n[thresholds.secrets]\nhigh = 0\n"
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    assert config.threshold_resolution.thresholds_for(Category.SECRETS) == {Severity.HIGH: 0}
+
+
+def test_a_category_without_its_own_table_falls_back_to_the_default(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[thresholds]\nmedium = 25\n\n[thresholds.secrets]\nhigh = 0\n"
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    assert config.threshold_resolution.thresholds_for(Category.SCA) == {Severity.MEDIUM: 25}
+
+
+def test_cli_fail_on_replaces_every_category_table_too(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[thresholds]\nmedium = 25\n\n[thresholds.secrets]\nhigh = 0\n"
+    )
+
+    config = load_config(
+        cli_overrides={"fail_on": "high"},
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    resolution = config.threshold_resolution
+    assert resolution.source is ConfigLayer.CLI
+    assert resolution.category_thresholds == {}
+    assert resolution.superseded == {Severity.MEDIUM: 25}
+    assert resolution.superseded_category_thresholds == {Category.SECRETS: {Severity.HIGH: 0}}
+    assert resolution.thresholds_for(Category.SECRETS) == {Severity.CRITICAL: 0, Severity.HIGH: 0}
+    assert resolution.thresholds_for(Category.SCA) == {Severity.CRITICAL: 0, Severity.HIGH: 0}
+
+
+def test_only_category_tables_declared_still_wins_over_a_flat_file_fail_on(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        'fail_on = "critical"\n[thresholds.secrets]\nhigh = 0\n'
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    resolution = config.threshold_resolution
+    assert resolution.source is ConfigLayer.FILE
+    assert resolution.superseded is None
+    assert resolution.superseded_category_thresholds == {}
+    assert resolution.thresholds_for(Category.SECRETS) == {Severity.HIGH: 0}
+    assert resolution.thresholds_for(Category.SCA) == {}
+
+
+def test_unknown_category_under_thresholds_is_a_configuration_error(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text("[thresholds.bogus]\nhigh = 0\n")
+
+    with pytest.raises(ConfigurationError, match="unknown category"):
         load_config(
             explicit_config_path=None,
             workspace_path=str(tmp_path),

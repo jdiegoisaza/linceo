@@ -121,7 +121,7 @@ def test_console_report_hints_at_recommended_threshold_when_not_enforced() -> No
     report = _render(result)
 
     assert "not enforced (no thresholds configured)" in report
-    assert "With --fail-on high this run would have failed: 1 CRITICAL" in report
+    assert "With --fail-on high this run would have failed: secrets: 1 CRITICAL" in report
 
 
 def test_console_report_says_would_have_passed_when_no_breaching_findings() -> None:
@@ -240,6 +240,86 @@ def test_no_policy_override_line_when_nothing_was_superseded() -> None:
     report = _render(result)
 
     assert "Policy override" not in report
+
+
+def test_policy_override_names_a_replaced_category_table_too() -> None:
+    resolution = ThresholdResolution(
+        thresholds={Severity.CRITICAL: 0, Severity.HIGH: 0},
+        source=ConfigLayer.CLI,
+        fail_on=Severity.HIGH,
+        superseded={Severity.MEDIUM: 25},
+        superseded_category_thresholds={Category.SECRETS: {Severity.HIGH: 5}},
+        superseded_from=".devsecops/config.toml",
+    )
+    result = RunResult(
+        run_id="run-1",
+        context=_CONTEXT,
+        executions=(_execution(()),),
+        findings=(),
+        verdict=evaluate_gate((), resolution=resolution),
+        status=RunStatus.COMPLETED,
+    )
+
+    report = _render(result)
+
+    assert "[thresholds] (medium=25)" in report
+    assert "[thresholds.secrets] (high=5)" in report
+
+
+# --- per-category threshold source announcement (ADR §8.1) --------------------
+
+
+def test_report_names_the_category_table_that_produced_its_thresholds() -> None:
+    resolution = ThresholdResolution(
+        thresholds={},
+        category_thresholds={Category.SECRETS: {Severity.HIGH: 0}},
+        source=ConfigLayer.FILE,
+    )
+    result = RunResult(
+        run_id="run-1",
+        context=_CONTEXT,
+        executions=(_execution(()),),
+        findings=(),
+        verdict=evaluate_gate((), resolution=resolution),
+        status=RunStatus.COMPLETED,
+    )
+
+    report = _render(result)
+
+    assert "Thresholds:" in report
+    assert "secrets: [thresholds.secrets] (high=0)" in report
+
+
+def test_report_names_the_default_table_for_a_category_without_its_own() -> None:
+    resolution = ThresholdResolution(thresholds={Severity.MEDIUM: 25}, source=ConfigLayer.FILE)
+    result = RunResult(
+        run_id="run-1",
+        context=_CONTEXT,
+        executions=(_execution(()),),
+        findings=(),
+        verdict=evaluate_gate((), resolution=resolution),
+        status=RunStatus.COMPLETED,
+    )
+
+    report = _render(result)
+
+    assert "secrets: [thresholds] (medium=25)" in report
+
+
+def test_no_threshold_source_line_when_the_gate_is_not_configured() -> None:
+    result = _result(fail_on=None, findings=())
+
+    report = _render(result)
+
+    assert "Thresholds:" not in report
+
+
+def test_threshold_source_line_names_fail_on_when_it_is_the_active_gate() -> None:
+    result = _result(fail_on=Severity.HIGH, findings=())
+
+    report = _render(result)
+
+    assert "Thresholds: --fail-on high (critical=0, high=0), applies to every category." in report
 
 
 # --- findings tables (ADR §7) --------------------------------------------------
@@ -370,7 +450,9 @@ def test_two_executions_of_the_same_category_only_render_one_table() -> None:
 
     report = _render(result)
 
-    assert report.count("secrets:") == 1
+    # The gate lines also say "secrets:" (a per-category hint/breach prefix, ADR §8.1) —
+    # count only the findings-table section header, which always sits on its own line.
+    assert report.count("secrets:\n") == 1
 
 
 def test_json_report_round_trips_every_finding_losslessly() -> None:

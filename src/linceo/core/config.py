@@ -19,12 +19,15 @@ chain, but interact differently:
   follow the chain field by field — the highest layer that mentions a
   field wins, independently of the others.
 - The **gate's thresholds** are richer than a single `fail_on` cutoff can
-  express (ADR §8.1): a policy file's `[thresholds]` table is read too, and
-  a `fail_on` value from a *higher* layer (CLI or an environment variable)
-  replaces that table entirely rather than merging with it field by field
-  — one flag should not partially edit a policy file's declared intent.
-  When that happens, `ThresholdResolution.superseded` records what was
-  replaced, so a report can say so explicitly (ADR §8.1).
+  express (ADR §8.1): a policy file's `[thresholds]` table is read too,
+  along with any `[thresholds.<category>]` sub-table it declares, and a
+  `fail_on` value from a *higher* layer (CLI or an environment variable)
+  replaces every one of those tables entirely rather than merging with any
+  of them field by field — one flag should not partially edit a policy
+  file's declared intent, for the default table or for a category's own.
+  When that happens, `ThresholdResolution.superseded` and
+  `superseded_category_thresholds` record what was replaced, so a report
+  can say so explicitly (ADR §8.1).
 - **Exclusions, tool skips, and per-tool configuration** are file-only for
   now (ADR §8, §8.2, §8.5): there is no CLI or environment-variable
   equivalent, only the policy document's `[[exclusions]]`,
@@ -44,6 +47,7 @@ from typing import cast
 from linceo.core.policy import (
     DEFAULT_MAX_HORIZON_DAYS,
     DEFAULT_REPORT_MAX_ROWS,
+    CategoryThresholds,
     ConfigLayer,
     Policy,
     PolicyConfigurationError,
@@ -417,31 +421,40 @@ def _resolve_threshold_resolution(
     fail_on: Severity | None,
     fail_on_layer: ConfigLayer,
     file_thresholds: Thresholds | None,
+    file_category_thresholds: CategoryThresholds,
     file_path: str,
 ) -> ThresholdResolution:
-    """Combine the resolved `fail_on` cutoff with a policy file's `[thresholds]` table.
+    """Combine the resolved `fail_on` cutoff with a policy file's `[thresholds]` tables.
 
     A `fail_on` set from `CLI` or `ENV` outranks the file entirely and
-    replaces `[thresholds]` rather than merging with it (ADR §8.1);
-    `superseded`/`superseded_from` record what was replaced so a report can
-    announce it. Within the `FILE` layer itself, an explicit `[thresholds]`
-    table wins over a flat `fail_on` key when a document declares both —
-    the richer declaration, not an override between layers, so nothing is
-    announced as superseded.
+    replaces every table it declared — the default `[thresholds]` and any
+    `[thresholds.<name>]` — rather than merging with any of them (ADR
+    §8.1); `superseded`/`superseded_category_thresholds`/`superseded_from`
+    record what was replaced so a report can announce it. Within the
+    `FILE` layer itself, any table under `[thresholds]` — the default one,
+    a category's own, or both — wins over a flat `fail_on` key when a
+    document declares both: the richer declaration, not an override
+    between layers, so nothing is announced as superseded.
     """
+    file_declares_thresholds = file_thresholds is not None or bool(file_category_thresholds)
     if fail_on_layer in (ConfigLayer.CLI, ConfigLayer.ENV):
         resolution = ThresholdResolution.for_fail_on(fail_on, source=fail_on_layer)
-        if file_thresholds is not None:
+        if file_declares_thresholds:
             return ThresholdResolution(
                 thresholds=resolution.thresholds,
                 source=resolution.source,
                 fail_on=resolution.fail_on,
                 superseded=file_thresholds,
+                superseded_category_thresholds=file_category_thresholds,
                 superseded_from=file_path,
             )
         return resolution
-    if file_thresholds is not None:
-        return ThresholdResolution(thresholds=file_thresholds, source=ConfigLayer.FILE)
+    if file_declares_thresholds:
+        return ThresholdResolution(
+            thresholds=file_thresholds or {},
+            category_thresholds=file_category_thresholds,
+            source=ConfigLayer.FILE,
+        )
     if fail_on_layer is ConfigLayer.FILE:
         return ThresholdResolution.for_fail_on(fail_on, source=ConfigLayer.FILE)
     return ThresholdResolution.for_fail_on(None, source=ConfigLayer.DEFAULT)
@@ -529,6 +542,7 @@ def load_config(
         fail_on=fail_on,
         fail_on_layer=fail_on_layer,
         file_thresholds=policy_document.thresholds,
+        file_category_thresholds=policy_document.category_thresholds,
         file_path=file_path,
     )
 

@@ -24,7 +24,7 @@ from linceo.core.exit_codes import (
     compute_exit_code,
 )
 from linceo.core.findings import Category, Finding, Location, Package, RawFinding
-from linceo.core.gate import count_by_severity, evaluate_gate
+from linceo.core.gate import count_by_category_and_severity, count_by_severity, evaluate_gate
 from linceo.core.normalization import (
     SeverityNormalizer,
     UnresolvedSeverityError,
@@ -32,6 +32,7 @@ from linceo.core.normalization import (
 )
 from linceo.core.policy import (
     DEFAULT_MAX_DATA_SOURCE_AGE_DAYS,
+    CategoryThresholds,
     ConfigLayer,
     Exclusion,
     ExclusionOutcome,
@@ -82,6 +83,7 @@ __all__ = [
     "SEVERITY_ORDER",
     "TOOL_INTEGRATION_ENTRY_POINT_GROUP",
     "Category",
+    "CategoryThresholds",
     "Column",
     "Config",
     "ConfigLayer",
@@ -125,6 +127,7 @@ __all__ = [
     "Verdict",
     "apply_exclusions",
     "compute_exit_code",
+    "count_by_category_and_severity",
     "count_by_severity",
     "deduplicate",
     "evaluate_gate",

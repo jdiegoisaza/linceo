@@ -4,12 +4,23 @@ Three mechanisms share one document, parsed here from an already-decoded
 mapping (`parse_policy_document`) so the same schema serves a local file
 today and a remote source later without changing (ADR §8):
 
-- **Thresholds** — a maximum finding count allowed per severity. A plain
-  `--fail-on X` is the simple case of this mechanism, not a separate one
+- **Thresholds** — a maximum finding count allowed per severity, optionally
+  further specialized per category (ADR §8.1): `[thresholds]` is the
+  default table, applied to any category that declares no table of its
+  own; `[thresholds.<category>]` (e.g. `[thresholds.secrets]`) replaces
+  `[thresholds]` *entirely* for that one category, never merging with it
+  field by field — a category with its own table answers "what breaches
+  this category's gate?" from that table alone. A plain `--fail-on X` is
+  the simple case of this mechanism, not a separate one
   (`thresholds_from_fail_on`): it sets a maximum of `0` for every severity
-  at or above `X` and leaves the rest unconstrained. `Severity.INFO` can
-  never be constrained (ADR §6): the escalation from a plain scalar cutoff
-  to a per-severity table must not be able to defeat that guarantee.
+  at or above `X` and leaves the rest unconstrained, and it replaces every
+  table — the default one and every per-category one — the same way it
+  already replaced the single `[thresholds]` table before per-category
+  tables existed. `Severity.INFO` can never be constrained (ADR §6): the
+  escalation from a plain scalar cutoff to a per-severity table, and from
+  there to a per-category one, must not be able to defeat that guarantee.
+  An unrecognized category name under `[thresholds.<name>]` is a
+  configuration error, never silently ignored.
 - **Exclusions** — the generalized form of what the ADR calls the
   baseline: a fingerprint (or an unambiguous prefix of one, ADR §7's `FP`
   column), why it is suppressed, by whom, until when, and an optional
@@ -27,7 +38,7 @@ mapped by `core.config` to exit code 2).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from enum import StrEnum
 
@@ -38,6 +49,12 @@ from linceo.core.severity import SEVERITY_ORDER, Severity
 #: a severity absent from the mapping is unconstrained. `Severity.INFO` may
 #: never be a key (ADR §6) — enforced by `validate_thresholds`.
 Thresholds = Mapping[Severity, int]
+
+#: Maps a category to the `Thresholds` table declared just for it
+#: (`[thresholds.<category>]`, ADR §8.1) — a category absent from this
+#: mapping has no table of its own and falls back to the plain
+#: `[thresholds]` table instead (`ThresholdResolution.thresholds_for`).
+CategoryThresholds = Mapping[Category, Thresholds]
 
 #: Default maximum distance between the day a policy document is loaded and
 #: any entry's `expires_at`, in days (ADR §8.2) — an `expires_at` fixed
@@ -131,14 +148,25 @@ def validate_thresholds(thresholds: Thresholds) -> None:
 class ThresholdResolution:
     """Where the gate's active thresholds came from, and what a higher layer replaced (ADR §8.1).
 
+    `thresholds` is the default table — from a policy file's plain
+    `[thresholds]`, or derived from `fail_on` via `thresholds_from_fail_on`
+    — applied to any category with no table of its own.
+    `category_thresholds` holds each category's own `[thresholds.<name>]`
+    table, when the file declares one; `thresholds_for` is how a caller
+    resolves the table that actually applies to one category, and is the
+    only place that lookup happens (ADR §8.1: no category-name conditionals
+    outside this one method).
+
     `fail_on` is the scalar cutoff that produced `thresholds` via
     `thresholds_from_fail_on`, when that is how they were produced — `None`
     when `thresholds` came directly from a policy file's `[thresholds]`
-    table instead. `superseded` is the policy file's own `[thresholds]`
-    table when a CLI flag or environment variable outranked it entirely
-    (ADR §8.1's "the flag replaces the file's table, never merges with it");
-    `None` when nothing was overridden. `superseded_from` names the file
-    path that declared it, for the report to point at.
+    table instead. `superseded` and `superseded_category_thresholds` are
+    the policy file's own tables — the default one and any per-category
+    ones — when a CLI flag or environment variable outranked them entirely
+    (ADR §8.1's "the flag replaces every table, never merges with any of
+    them"); both empty/`None` when nothing was overridden.
+    `superseded_from` names the file path that declared them, for the
+    report to point at.
     """
 
     thresholds: Thresholds
@@ -146,12 +174,31 @@ class ThresholdResolution:
     fail_on: Severity | None = None
     superseded: Thresholds | None = None
     superseded_from: str | None = None
+    category_thresholds: CategoryThresholds = field(default_factory=dict)
+    superseded_category_thresholds: CategoryThresholds = field(default_factory=dict)
 
     @classmethod
     def for_fail_on(cls, fail_on: Severity | None, *, source: ConfigLayer) -> ThresholdResolution:
         """Build the resolution for a plain `--fail-on` value (or `None` for "no gate")."""
         thresholds = thresholds_from_fail_on(fail_on) if fail_on is not None else {}
         return cls(thresholds=thresholds, source=source, fail_on=fail_on)
+
+    @property
+    def is_configured(self) -> bool:
+        """Whether any gate at all is configured — a default table, or at least one category's."""
+        return bool(self.thresholds) or bool(self.category_thresholds)
+
+    def thresholds_for(self, category: Category) -> Thresholds:
+        """The table that actually applies to `category` (ADR §8.1).
+
+        `category`'s own `[thresholds.<name>]` table, if the file declared
+        one, entirely — never merged field by field with the default
+        table. Otherwise, the default `[thresholds]` table (itself possibly
+        empty, meaning unconstrained). This is the one place that decides
+        this, so `core.gate` never has to know a category's name to
+        evaluate its breaches.
+        """
+        return self.category_thresholds.get(category, self.thresholds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,13 +373,18 @@ class PolicyDocument:
 
     Produced by `parse_policy_document` from already-decoded data — a local
     TOML file today, any other source later without this shape changing
-    (ADR §8). `thresholds` is `None` when the document declares no
-    `[thresholds]` table at all, distinct from an empty one (which is not
-    expressible in TOML anyway, but kept `None` rather than `{}` so
-    `core.config` can tell "absent" from "present and empty").
+    (ADR §8). `thresholds` is `None` when the document declares no direct
+    `severity = count` entries under `[thresholds]`, distinct from an empty
+    table (which is not expressible in TOML anyway, but kept `None` rather
+    than `{}` so `core.config` can tell "absent" from "present and empty"),
+    even when `[thresholds]` is present solely to hold
+    `[thresholds.<name>]` sub-tables. `category_thresholds` holds exactly
+    those sub-tables, keyed by `Category` — empty when the document
+    declares none (ADR §8.1).
     """
 
     thresholds: Thresholds | None
+    category_thresholds: CategoryThresholds
     exclusions: tuple[Exclusion, ...]
     tool_skips: tuple[ToolSkip, ...]
 
@@ -393,37 +445,93 @@ def _as_table_list(value: object | None, *, name: str) -> Sequence[Mapping[str, 
     return value
 
 
-def _parse_thresholds(raw: object | None) -> Thresholds | None:
-    """Parse the `[thresholds]` table, or return `None` if absent.
+def _parse_severity_table(raw: Mapping[str, object], *, context: str) -> Thresholds:
+    """Parse a table of `severity = count` entries — `[thresholds]` or one `[thresholds.<name>]`.
+
+    Shared by both, since a category-specific table is validated exactly
+    like the default one (ADR §8.1): same severity vocabulary, same count
+    rules, same `Severity.INFO` ban. `context` only changes the error
+    messages (`"thresholds"` or `"thresholds.<name>"`).
 
     Raises:
-        PolicyConfigurationError: for a non-table value, an unknown
-            severity name, a non-integer or negative count, or a count for
-            `Severity.INFO`.
+        PolicyConfigurationError: for an unknown severity name, a
+            non-integer or negative count, or a count for `Severity.INFO`.
     """
-    if raw is None:
-        return None
-    if not isinstance(raw, Mapping):
-        msg = f"thresholds must be a table, got {type(raw).__name__}"
-        raise PolicyConfigurationError(msg)
-
     thresholds: dict[Severity, int] = {}
     for key, value in raw.items():
         try:
             severity = Severity(str(key).strip().upper())
         except ValueError as exc:
-            msg = f"unknown severity in thresholds: {key!r}"
+            msg = f"unknown severity in {context}: {key!r}"
             raise PolicyConfigurationError(msg) from exc
         if not isinstance(value, int) or isinstance(value, bool):
-            msg = f"thresholds.{key} must be an integer, got {value!r}"
+            msg = f"{context}.{key} must be an integer, got {value!r}"
             raise PolicyConfigurationError(msg)
         if value < 0:
-            msg = f"thresholds.{key} must not be negative, got {value}"
+            msg = f"{context}.{key} must not be negative, got {value}"
             raise PolicyConfigurationError(msg)
         thresholds[severity] = value
 
     validate_thresholds(thresholds)
     return thresholds
+
+
+def _parse_threshold_category(key: object) -> Category:
+    """Resolve a `[thresholds.<name>]` sub-table's key to a known `Category`.
+
+    Raises:
+        PolicyConfigurationError: if `key` does not name a registered
+            `Category` — an unrecognized category is a configuration
+            error, never a table silently ignored (ADR §8.1).
+    """
+    try:
+        return Category(str(key))
+    except ValueError as exc:
+        msg = f"unknown category in thresholds: {key!r}"
+        raise PolicyConfigurationError(msg) from exc
+
+
+def _parse_thresholds(raw: object | None) -> tuple[Thresholds | None, CategoryThresholds]:
+    """Parse `[thresholds]` into its default table and its per-category sub-tables (ADR §8.1).
+
+    A `[thresholds.<name>]` sub-table decodes as a nested mapping under the
+    `thresholds` key, so this tells the two apart by shape: an entry whose
+    value is itself a table is a category's own thresholds
+    (`_parse_threshold_category` resolves `<name>`, generically — no
+    per-category branch here or anywhere downstream, ADR §8.1); every other
+    entry is a `severity = count` pair belonging to the default table. The
+    default table is `None` when the document declares no direct severity
+    entries at all, distinct from present-and-empty, the same distinction
+    `PolicyDocument.thresholds` already made before category tables
+    existed — even when `[thresholds]` is present solely to hold
+    `[thresholds.<name>]` sub-tables.
+
+    Raises:
+        PolicyConfigurationError: for a non-table `raw`, an unrecognized
+            category name, or anything `_parse_severity_table` rejects for
+            either the default table or a category's own.
+    """
+    if raw is None:
+        return None, {}
+    if not isinstance(raw, Mapping):
+        msg = f"thresholds must be a table, got {type(raw).__name__}"
+        raise PolicyConfigurationError(msg)
+
+    default_entries: dict[str, object] = {}
+    category_thresholds: dict[Category, Thresholds] = {}
+    for key, value in raw.items():
+        if isinstance(value, Mapping):
+            category = _parse_threshold_category(key)
+            category_thresholds[category] = _parse_severity_table(
+                value, context=f"thresholds.{key}"
+            )
+        else:
+            default_entries[key] = value
+
+    thresholds = (
+        _parse_severity_table(default_entries, context="thresholds") if default_entries else None
+    )
+    return thresholds, category_thresholds
 
 
 def _parse_optional_str(entry: Mapping[str, object], *, field: str) -> str | None:
@@ -556,7 +664,7 @@ def parse_policy_document(
         PolicyConfigurationError: see `_parse_thresholds`, `_parse_exclusion`,
             and `_parse_tool_skip`.
     """
-    thresholds = _parse_thresholds(document.get("thresholds"))
+    thresholds, category_thresholds = _parse_thresholds(document.get("thresholds"))
     exclusions = tuple(
         _parse_exclusion(entry, today=today, max_horizon_days=max_horizon_days)
         for entry in _as_table_list(document.get("exclusions"), name="exclusions")
@@ -565,7 +673,12 @@ def parse_policy_document(
         _parse_tool_skip(entry, today=today, max_horizon_days=max_horizon_days)
         for entry in _as_table_list(document.get("skipped_tools"), name="skipped_tools")
     )
-    return PolicyDocument(thresholds=thresholds, exclusions=exclusions, tool_skips=tool_skips)
+    return PolicyDocument(
+        thresholds=thresholds,
+        category_thresholds=category_thresholds,
+        exclusions=exclusions,
+        tool_skips=tool_skips,
+    )
 
 
 def baseline_wave_expiry(

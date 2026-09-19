@@ -389,8 +389,68 @@ def test_document_with_no_policy_sections_parses_to_empty() -> None:
     parsed = parse_policy_document({}, today=TODAY, max_horizon_days=90)
 
     assert parsed.thresholds is None
+    assert parsed.category_thresholds == {}
     assert parsed.exclusions == ()
     assert parsed.tool_skips == ()
+
+
+# --- per-category thresholds (ADR §8.1) -----------------------------------------
+
+
+def test_category_threshold_table_parses_separately_from_the_default_table() -> None:
+    document = {
+        "thresholds": {
+            "high": 5,
+            "secrets": {"critical": 0, "high": 0},
+            "sca": {"high": 5, "medium": 25},
+        }
+    }
+
+    parsed = parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+    assert parsed.thresholds == {Severity.HIGH: 5}
+    assert parsed.category_thresholds == {
+        Category.SECRETS: {Severity.CRITICAL: 0, Severity.HIGH: 0},
+        Category.SCA: {Severity.HIGH: 5, Severity.MEDIUM: 25},
+    }
+
+
+def test_thresholds_present_only_as_category_tables_leaves_the_default_none() -> None:
+    document = {"thresholds": {"secrets": {"high": 0}}}
+
+    parsed = parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+    assert parsed.thresholds is None
+    assert parsed.category_thresholds == {Category.SECRETS: {Severity.HIGH: 0}}
+
+
+def test_unknown_category_under_thresholds_is_a_configuration_error() -> None:
+    document = {"thresholds": {"bogus": {"high": 0}}}
+
+    with pytest.raises(PolicyConfigurationError, match="unknown category"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
+def test_a_category_name_used_as_a_flat_key_is_still_an_unknown_severity() -> None:
+    """`secrets = 5` (not a sub-table) is a severity-shaped entry, not a category one."""
+    document = {"thresholds": {"secrets": 5}}
+
+    with pytest.raises(PolicyConfigurationError, match="unknown severity"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
+def test_category_threshold_table_naming_info_is_a_configuration_error() -> None:
+    document = {"thresholds": {"secrets": {"info": 0}}}
+
+    with pytest.raises(PolicyConfigurationError, match="INFO"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
+def test_category_threshold_table_with_an_unknown_severity_is_a_configuration_error() -> None:
+    document = {"thresholds": {"secrets": {"bogus": 0}}}
+
+    with pytest.raises(PolicyConfigurationError, match="unknown severity"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
 
 
 def test_exclusions_not_a_list_of_tables_is_a_configuration_error() -> None:

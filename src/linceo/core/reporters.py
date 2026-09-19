@@ -20,12 +20,7 @@ from linceo.core.execution import ExecutionStatus
 from linceo.core.findings import Category, Finding
 from linceo.core.fingerprint import short_fingerprints
 from linceo.core.gate import find_breaches
-from linceo.core.policy import (
-    DEFAULT_REPORT_MAX_ROWS,
-    ConfigLayer,
-    ThresholdResolution,
-    thresholds_from_fail_on,
-)
+from linceo.core.policy import DEFAULT_REPORT_MAX_ROWS, ConfigLayer, ThresholdResolution
 from linceo.core.report_schema import ReportSchema
 from linceo.core.results import RunResult, RunStatus, ThresholdBreach
 from linceo.core.severity import SEVERITY_ORDER, Severity
@@ -52,18 +47,45 @@ def _format_thresholds(thresholds: Mapping[Severity, int]) -> str:
 
 
 def _format_breach(breach: ThresholdBreach) -> str:
-    return f"{breach.count} {breach.severity.value} exceeds the maximum allowed of {breach.maximum}"
+    return (
+        f"{breach.category.value}: {breach.count} {breach.severity.value} exceeds "
+        f"the maximum allowed of {breach.maximum}"
+    )
+
+
+def _describe_thresholds_table(label: str, thresholds: Mapping[Severity, int]) -> str:
+    """Render one named table for the policy-override announcement: `"[thresholds] (high=5)"`."""
+    return f"{label} ({_format_thresholds(thresholds) or 'no maximums'})"
+
+
+def _superseded_tables_text(resolution: ThresholdResolution) -> str:
+    """List every table a higher layer replaced — the default one and any per-category ones.
+
+    Ordered `Category`'s own declaration order after the default table, so
+    the listing is deterministic regardless of `dict` iteration order
+    (ADR R3) — this is the only place in the reporter that iterates
+    `Category`, and it does so generically, the same as `core.gate`.
+    """
+    parts = []
+    if resolution.superseded is not None:
+        parts.append(_describe_thresholds_table("[thresholds]", resolution.superseded))
+    for category in Category:
+        table = resolution.superseded_category_thresholds.get(category)
+        if table is not None:
+            parts.append(_describe_thresholds_table(f"[thresholds.{category.value}]", table))
+    return "; ".join(parts) if parts else "no maximums"
 
 
 def _policy_override_lines(resolution: ThresholdResolution) -> list[str]:
-    """Announce when a higher layer replaced the policy file's `[thresholds]` table (ADR §8.1).
+    """Announce when a higher layer replaced the policy file's threshold table(s) (ADR §8.1).
 
     A gate that silently diverges from the policy a repository declared
     would lose the trust of whoever wrote it — this is printed
-    unconditionally whenever `resolution.superseded` is set, never folded
-    into a debug-only or `--verbose` path.
+    unconditionally whenever `resolution.superseded` or
+    `resolution.superseded_category_thresholds` is set, never folded into
+    a debug-only or `--verbose` path.
     """
-    if resolution.superseded is None:
+    if resolution.superseded is None and not resolution.superseded_category_thresholds:
         return []
 
     if resolution.source is ConfigLayer.CLI and resolution.fail_on is not None:
@@ -73,13 +95,49 @@ def _policy_override_lines(resolution: ThresholdResolution) -> list[str]:
     else:
         trigger = "the resolved configuration"
 
-    superseded_text = _format_thresholds(resolution.superseded) or "no maximums"
     source_name = resolution.superseded_from or "the policy file"
     return [
         f"Policy override: {trigger} replaced the thresholds declared in",
-        f"  {source_name} ({superseded_text}).",
+        f"  {source_name}: {_superseded_tables_text(resolution)}.",
         "",
     ]
+
+
+def _threshold_source_lines(result: RunResult) -> list[str]:
+    """Name, for each category that ran, which table its applied thresholds came from (ADR §8.1).
+
+    Printed only when some gate is actually configured
+    (`resolution.is_configured`) — an unconfigured gate already says so in
+    `_gate_lines`' own "not enforced" line, and repeating that per category
+    here would be noise. Uses `resolution.thresholds_for` — the same
+    single lookup `core.gate` uses to evaluate breaches — so the label
+    shown here can never disagree with what was actually enforced.
+    """
+    resolution = result.verdict.resolution
+    if not resolution.is_configured:
+        return []
+
+    categories: list[Category] = []
+    for execution in result.executions:
+        if execution.category not in categories:
+            categories.append(execution.category)
+    if not categories:
+        return []
+
+    if resolution.source in (ConfigLayer.CLI, ConfigLayer.ENV) and resolution.fail_on is not None:
+        trigger = f"--fail-on {resolution.fail_on.value.lower()}"
+        rendered = _format_thresholds(resolution.thresholds) or "unconstrained"
+        return [f"Thresholds: {trigger} ({rendered}), applies to every category.", ""]
+
+    lines = ["Thresholds:"]
+    for category in categories:
+        table = resolution.thresholds_for(category)
+        rendered = _format_thresholds(table) or "unconstrained"
+        has_own_table = category in resolution.category_thresholds
+        origin = f"[thresholds.{category.value}]" if has_own_table else "[thresholds]"
+        lines.append(f"  - {category.value}: {origin} ({rendered})")
+    lines.append("")
+    return lines
 
 
 def _active_findings(result: RunResult) -> tuple[Finding, ...]:
@@ -180,6 +238,7 @@ def _gate_lines(result: RunResult) -> list[str]:
     """The gate verdict, never rendered as `PASSED` when `result.status` is `PARTIAL` (ADR §5)."""
     verdict = result.verdict
     lines = _policy_override_lines(verdict.resolution)
+    lines.extend(_threshold_source_lines(result))
 
     if result.status is RunStatus.PARTIAL:
         incomplete = sum(
@@ -195,13 +254,15 @@ def _gate_lines(result: RunResult) -> list[str]:
             lines.extend(f"  - {_format_breach(breach)}" for breach in verdict.breaches)
         return lines
 
-    if not verdict.resolution.thresholds:
-        recommended_breaches = find_breaches(
-            verdict.counts_by_severity, thresholds_from_fail_on(_RECOMMENDED_FAIL_ON)
+    if not verdict.resolution.is_configured:
+        hint_resolution = ThresholdResolution.for_fail_on(
+            _RECOMMENDED_FAIL_ON, source=ConfigLayer.DEFAULT
         )
+        recommended_breaches = find_breaches(verdict.counts_by_category, hint_resolution)
         if recommended_breaches:
             summary = ", ".join(
-                f"{breach.count} {breach.severity.value}" for breach in recommended_breaches
+                f"{breach.category.value}: {breach.count} {breach.severity.value}"
+                for breach in recommended_breaches
             )
             lines.append(
                 f"Gate: not enforced (no thresholds configured). With --fail-on "
