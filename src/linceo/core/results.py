@@ -108,6 +108,13 @@ class RunResult:
     entries that were active for this run (each corresponding to a
     `ToolExecution` with `status = SKIPPED_BY_POLICY`); `expired_tool_skips`
     names ones that had lapsed, whose tool ran normally instead.
+
+    `severity_map_version` is `severity_map.toml`'s own `map_version` at
+    the time this run's `SeverityNormalizer` was built
+    (`linceo.core.normalization.SeverityNormalizer.map_version`) — ADR §6:
+    "un reporte declara con qué versión del mapa se produjeron sus
+    severidades", so two runs of the same finding under different map
+    versions are never mistaken for directly comparable.
     """
 
     run_id: str
@@ -116,6 +123,7 @@ class RunResult:
     findings: tuple[Finding, ...]
     verdict: Verdict
     status: RunStatus
+    severity_map_version: str
     suppressed_findings: tuple[Finding, ...] = ()
     expired_exclusions: tuple[Exclusion, ...] = ()
     applied_tool_skips: tuple[ToolSkip, ...] = ()

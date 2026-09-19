@@ -24,7 +24,7 @@ import typer
 
 from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.adapters.subprocess_executor import SubprocessToolExecutor
-from linceo.adapters.trivy import TRIVY_NATIVE_SEVERITY_MAP, TrivyIntegration, TrivyOutputError
+from linceo.adapters.trivy import TrivyIntegration, TrivyOutputError
 from linceo.core.config import Config, ConfigurationError, load_config
 from linceo.core.context import ContextResolutionError, Platform
 from linceo.core.engine import run
@@ -36,6 +36,7 @@ from linceo.core.policy import PolicyConfigurationError
 from linceo.core.ports import ContextProvider, ToolExecutor, ToolIntegration
 from linceo.core.reporters import render_console, render_json
 from linceo.core.sarif import render_sarif
+from linceo.core.severity_map import load_severity_map
 from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError, resolve_tool_config
 from linceo.providers.azure_devops import AzureDevOpsContextProvider
 from linceo.providers.detection import detect_platform
@@ -341,6 +342,7 @@ def scan_secrets(
 
     executor = SubprocessToolExecutor()
     gitleaks_version = detect_gitleaks_version(executor)
+    severity_map = load_severity_map()
 
     _run_scan(
         category=Category.SECRETS,
@@ -348,7 +350,7 @@ def scan_secrets(
         context_provider=context_provider,
         workspace_path=workspace_path,
         executor=executor,
-        normalizer=SeverityNormalizer(),
+        normalizer=SeverityNormalizer.from_severity_map(severity_map),
         resolved_config=resolved_config,
         output_format=output_format,
         dry_run=dry_run,
@@ -426,14 +428,19 @@ def scan_sca(
 
     executor = SubprocessToolExecutor()
     trivy_version, db_data_sources = detect_trivy(executor)
+    severity_map = load_severity_map()
 
     _run_scan(
         category=Category.SCA,
-        integration=TrivyIntegration(version=trivy_version, db_data_sources=db_data_sources),
+        integration=TrivyIntegration(
+            version=trivy_version,
+            db_data_sources=db_data_sources,
+            cvss_source_preference=severity_map.cvss_source_preference,
+        ),
         context_provider=context_provider,
         workspace_path=workspace_path,
         executor=executor,
-        normalizer=SeverityNormalizer(native_map=TRIVY_NATIVE_SEVERITY_MAP),
+        normalizer=SeverityNormalizer.from_severity_map(severity_map),
         resolved_config=resolved_config,
         output_format=output_format,
         dry_run=dry_run,

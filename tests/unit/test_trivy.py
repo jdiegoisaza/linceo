@@ -20,7 +20,6 @@ import pytest
 from linceo.adapters.trivy import (
     TRIVY_BINARY,
     TRIVY_MISSING_BINARY_HINT,
-    TRIVY_NATIVE_SEVERITY_MAP,
     TRIVY_VULNERABILITY_DB_NAME,
     TrivyDatabaseNotReadyError,
     TrivyIntegration,
@@ -31,6 +30,7 @@ from linceo.core.findings import Category, Package
 from linceo.core.normalization import SeverityNormalizer
 from linceo.core.ports import ProcessResult
 from linceo.core.severity import Severity, SeveritySource
+from linceo.core.severity_map import load_severity_map
 from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError
 from linceo.testing import FakeToolExecutor
 
@@ -49,10 +49,11 @@ _REAL_DB_NOT_READY_STDERR = (
 #: A hand-built vulnerability entry — shaped exactly like a real one, just
 #: with values chosen to exercise a case none of the small, disposable
 #: scans behind the captured fixtures happened to produce naturally: a
-#: native `Severity` of `UNKNOWN` (deliberately unmapped by
-#: `TRIVY_NATIVE_SEVERITY_MAP`, see its docstring) with two disagreeing
-#: CVSS sources, to prove the `nvd`-first preference (ADR §6) is honored
-#: even when `redhat` would produce a higher, more alarming score.
+#: native `Severity` of `UNKNOWN` (deliberately unmapped in
+#: `severity_map.toml`'s own `[native.trivy]`, see that file) with two
+#: disagreeing CVSS sources, to prove the `nvd`-first preference (ADR §6)
+#: is honored even when `redhat` would produce a higher, more alarming
+#: score.
 _UNKNOWN_SEVERITY_REPORT = json.dumps(
     {
         "SchemaVersion": 2,
@@ -503,7 +504,7 @@ def test_some_other_nonzero_exit_raises_a_generic_trivy_output_error() -> None:
 def test_native_severity_wins_over_a_present_cvss_score() -> None:
     integration = TrivyIntegration(version="0.74.0")
     [finding] = integration.parse_output(_process_result(_load("one_finding.json")))
-    normalizer = SeverityNormalizer(native_map=TRIVY_NATIVE_SEVERITY_MAP)
+    normalizer = SeverityNormalizer.from_severity_map(load_severity_map())
 
     severity, source = normalizer.resolve(finding)
 
@@ -512,7 +513,8 @@ def test_native_severity_wins_over_a_present_cvss_score() -> None:
 
 
 def test_unknown_severity_prefers_nvd_cvss_source_deterministically() -> None:
-    """ADR §6's own worked example: NVD before a distro/vendor advisory."""
+    """ADR §6's own worked example: NVD before a distro/vendor advisory — the default
+    `cvss_source_preference` matches `severity_map.toml`'s own shipped value."""
     integration = TrivyIntegration(version="0.74.0")
 
     [finding] = integration.parse_output(_process_result(_UNKNOWN_SEVERITY_REPORT))
@@ -522,10 +524,10 @@ def test_unknown_severity_prefers_nvd_cvss_source_deterministically() -> None:
 
 
 def test_unknown_native_severity_falls_back_to_the_cvss_bucket_via_the_normalizer() -> None:
-    """TRIVY_NATIVE_SEVERITY_MAP deliberately excludes UNKNOWN so CVSS still gets a chance."""
+    """severity_map.toml deliberately excludes UNKNOWN so CVSS still gets a chance."""
     integration = TrivyIntegration(version="0.74.0")
     [finding] = integration.parse_output(_process_result(_UNKNOWN_SEVERITY_REPORT))
-    normalizer = SeverityNormalizer(native_map=TRIVY_NATIVE_SEVERITY_MAP)
+    normalizer = SeverityNormalizer.from_severity_map(load_severity_map())
 
     severity, source = normalizer.resolve(finding)
 

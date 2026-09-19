@@ -1,0 +1,78 @@
+# linceo's versioned severity map (ADR §6): "un artefacto de datos versionado,
+# no lógica dispersa". Three things live here, together, because all three
+# are what a `ToolIntegration`'s native severity vocabulary actually means,
+# and none of them belongs scattered across per-adapter Python constants:
+#
+#   - `[native.<tool>]`  — (tool, native value) -> normalized severity.
+#   - `[defaults.<category>]` — the severity a finding with no native or
+#     CVSS signal gets, for a tool that emits none (gitleaks) — `default`
+#     for the category as a whole, `rules` to escalate one specific
+#     `rule_id` above it.
+#   - `cvss_source_preference` — which CVSS source wins when a tool reports
+#     more than one for the same finding (ADR R3: this must be declared,
+#     never left to dict/JSON iteration order).
+#
+# A change here shows up as a plain, reviewable diff on a pull request,
+# instead of a silent edit buried inside a parser. `map_version` travels in
+# every run's own metadata (`RunResult.severity_map_version`) so a report
+# declares which version of this file produced its severities — bump it
+# whenever a change here is significant enough that two runs of the same
+# finding, mapped under different versions, should not be treated as
+# directly comparable.
+
+map_version = "v1"
+
+# The order multi-source CVSS data is preferred in, when a tool reports more
+# than one source for the same finding (ADR §6) — trivy's own `CVSS` map is
+# the only producer of this today. A source a tool reports that is not named
+# here is tried next, in a fixed alphabetical order — never dict/JSON
+# iteration order (ADR R3) — so the same report always resolves the same
+# score, on any machine, in any run. Declared up here, before any table
+# below, so it stays a plain top-level key and is never mistaken for
+# belonging to whichever table happens to precede it in the file.
+cvss_source_preference = ["nvd"]
+
+# A tool absent here, or a native value its own table does not name, has no
+# native-severity signal for that finding at all — `SeverityNormalizer`
+# falls through to CVSS, then the category default, then the fallback
+# (ADR §6's precedence chain).
+
+[native.gitleaks]
+# Empty on purpose: gitleaks emits no native severity value at all — every
+# `RawFinding` it produces has `raw_severity = None` (ADR §6).
+
+[native.trivy]
+LOW = "low"
+MEDIUM = "medium"
+HIGH = "high"
+CRITICAL = "critical"
+# UNKNOWN is deliberately absent: trivy defines it as "no severity signal
+# was available", so mapping it here would short-circuit the CVSS tier of
+# the precedence chain before it ever gets a chance to run — trivy's own
+# two-signal design (native severity *and*, separately, a CVSS score) is
+# exactly the case ADR §6 documents this exclusion for.
+
+# Per-category default for a finding with no native or CVSS signal at all
+# (ADR §6, "Herramientas que no emiten severidad nativa"). `rules` escalates
+# one specific `rule_id` above the category's own `default` — e.g. a rule
+# that detects private keys for critical infrastructure could be raised to
+# "critical" here, without touching the category's own default for every
+# other rule.
+[defaults.secrets]
+default = "high"
+# Every gitleaks finding is HIGH by default (not CRITICAL, not MEDIUM):
+# CRITICAL for everything would make `--fail-on CRITICAL` meaningless and
+# train a team to raise the threshold until it is ignored; MEDIUM would let
+# a real secret leak through the `--fail-on HIGH` this project's own
+# quickstart recommends (ADR §6).
+
+[defaults.secrets.rules]
+# Empty today — no gitleaks rule is judged to deserve more than the flat
+# default above yet. Escalate one here the day that changes, e.g.:
+# some-critical-rule-id = "critical"
+
+# No [defaults.sca]: an `sca` finding with neither a native severity nor a
+# usable CVSS score falls through to `SeverityNormalizer`'s own `fallback`
+# instead of a category default — unlike a secret, a CVE essentially always
+# carries at least one severity signal in practice, so this project has not
+# needed one yet.

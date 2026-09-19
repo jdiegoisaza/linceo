@@ -119,6 +119,7 @@ def _result(
         findings=all_findings,
         verdict=evaluate_gate(all_findings, resolution=resolution),
         status=RunStatus.COMPLETED,
+        severity_map_version="test-map-v1",
         suppressed_findings=suppressed_findings,
     )
 

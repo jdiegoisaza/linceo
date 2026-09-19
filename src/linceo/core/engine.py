@@ -271,6 +271,7 @@ def run(
         findings=deduplicated,
         verdict=verdict,
         status=status,
+        severity_map_version=effective_normalizer.map_version,
         suppressed_findings=exclusion_outcome.suppressed,
         expired_exclusions=exclusion_outcome.expired,
         applied_tool_skips=applied_tool_skips,

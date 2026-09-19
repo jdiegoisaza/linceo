@@ -300,6 +300,7 @@ def render_console(
         f"Run {result.run_id} — platform={result.context.platform.value} "
         f"repository={result.context.repository} commit={result.context.commit}",
         f"Status: {result.status.value}",
+        f"Severity map: {result.severity_map_version}",
         "",
         "Executions:",
     ]

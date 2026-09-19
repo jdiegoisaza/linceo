@@ -40,7 +40,7 @@ import typer
 
 from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.adapters.subprocess_executor import SubprocessToolExecutor
-from linceo.adapters.trivy import TRIVY_NATIVE_SEVERITY_MAP, TrivyIntegration
+from linceo.adapters.trivy import TrivyIntegration
 from linceo.cli.scan import (
     PlatformOption,
     detect_gitleaks_version,
@@ -71,6 +71,7 @@ from linceo.core.policy import (
 )
 from linceo.core.ports import ContextProvider, ToolExecutor
 from linceo.core.results import RunResult, RunStatus
+from linceo.core.severity_map import load_severity_map
 from linceo.providers.environment import process_environment
 
 baseline_app = typer.Typer(help="Generate and maintain the exclusions baseline (ADR §8.2).")
@@ -173,10 +174,12 @@ def _run_reference_scan(
     limitation of `run` itself, and both baseline commands genuinely need
     "el fichero completo" (ADR §8.2) from one real run, not two
     independently triggered ones a caller would have to reconcile by hand.
-    One combined `SeverityNormalizer` covers both tools correctly because
-    `native_map` is keyed by `(tool, raw_severity)` — gitleaks contributes
-    no native map at all (it reports no native severity, ADR §6), so
-    merging in trivy's changes nothing for it.
+    One combined `SeverityNormalizer`, built once from the one loaded
+    `severity_map.toml` (ADR §6), covers both tools correctly: its
+    `native_map` is keyed by `(tool, raw_severity)`, and that file's own
+    `[native.gitleaks]` table is empty (gitleaks reports no native
+    severity at all), so trivy's own entries are the only ones that ever
+    match.
 
     Running `resolved_config` as-is (rather than a bare `Config()`) means
     `[tool_defaults]`/`[tools.<name>]` apply exactly as they would to a
@@ -187,16 +190,21 @@ def _run_reference_scan(
     """
     gitleaks_version = detect_gitleaks_version(executor)
     trivy_version, db_data_sources = detect_trivy(executor)
+    severity_map = load_severity_map()
 
     return run(
         run_id=uuid.uuid4().hex,
         context_provider=context_provider,
         integrations={
             Category.SECRETS: GitleaksIntegration(version=gitleaks_version),
-            Category.SCA: TrivyIntegration(version=trivy_version, db_data_sources=db_data_sources),
+            Category.SCA: TrivyIntegration(
+                version=trivy_version,
+                db_data_sources=db_data_sources,
+                cvss_source_preference=severity_map.cvss_source_preference,
+            ),
         },
         executor=executor,
-        normalizer=SeverityNormalizer(native_map=TRIVY_NATIVE_SEVERITY_MAP),
+        normalizer=SeverityNormalizer.from_severity_map(severity_map),
         config=resolved_config,
         now=now,
     )

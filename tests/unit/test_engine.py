@@ -28,6 +28,7 @@ from linceo.core.ports import ProcessResult, ToolExecutor
 from linceo.core.report_schema import Column, ReportSchema
 from linceo.core.results import RunResult, RunStatus
 from linceo.core.severity import Severity
+from linceo.core.severity_map import CategorySeverityDefault
 from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError
 from linceo.testing import FakeContextProvider, FakeToolExecutor
 
@@ -128,7 +129,10 @@ def _run(
         context_provider=FakeContextProvider(context=_CONTEXT),
         integrations=integrations,
         executor=executor,
-        normalizer=SeverityNormalizer(native_map={("trivy", "HIGH"): Severity.HIGH}),
+        normalizer=SeverityNormalizer(
+            native_map={("trivy", "HIGH"): Severity.HIGH},
+            category_defaults={Category.SECRETS: CategorySeverityDefault(default=Severity.HIGH)},
+        ),
         config=config,
         now=_NOW,
     )

@@ -56,6 +56,13 @@ from linceo.core.reporters import render_console, render_json
 from linceo.core.results import RunResult, RunStatus, ThresholdBreach, Verdict
 from linceo.core.sarif import render_sarif
 from linceo.core.severity import SEVERITY_ORDER, Severity, SeveritySource
+from linceo.core.severity_map import (
+    CategorySeverityDefault,
+    SeverityMap,
+    SeverityMapError,
+    load_severity_map,
+    parse_severity_map,
+)
 from linceo.core.tool_config import (
     LEVEL_1_FIELD_NAMES,
     PassthroughValue,
@@ -83,6 +90,7 @@ __all__ = [
     "SEVERITY_ORDER",
     "TOOL_INTEGRATION_ENTRY_POINT_GROUP",
     "Category",
+    "CategorySeverityDefault",
     "CategoryThresholds",
     "Column",
     "Config",
@@ -110,6 +118,8 @@ __all__ = [
     "RunResult",
     "RunStatus",
     "Severity",
+    "SeverityMap",
+    "SeverityMapError",
     "SeverityNormalizer",
     "SeveritySource",
     "ThresholdBreach",
@@ -132,7 +142,9 @@ __all__ = [
     "deduplicate",
     "evaluate_gate",
     "load_config",
+    "load_severity_map",
     "normalize_finding",
+    "parse_severity_map",
     "parse_tool_configs",
     "parse_tool_defaults",
     "parse_version",

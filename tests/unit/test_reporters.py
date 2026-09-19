@@ -23,6 +23,7 @@ _CONTEXT = ExecutionContext(
     commit="abc123",
 )
 _SECRET_HASH = "deadbeef"  # noqa: S105 -- test fixture value, not a credential
+_MAP_VERSION = "test-map-v1"
 _SCHEMAS = {
     Category.SECRETS: ReportSchema(
         location=Column(
@@ -86,6 +87,7 @@ def _result(
         findings=findings,
         verdict=evaluate_gate(findings, resolution=resolution),
         status=status,
+        severity_map_version=_MAP_VERSION,
     )
 
 
@@ -180,6 +182,7 @@ def test_policy_override_is_announced_when_a_flag_replaces_the_files_thresholds(
         findings=(),
         verdict=evaluate_gate((), resolution=resolution),
         status=RunStatus.COMPLETED,
+        severity_map_version=_MAP_VERSION,
     )
 
     report = _render(result)
@@ -204,6 +207,7 @@ def test_policy_override_names_the_environment_variable_when_that_is_the_trigger
         findings=(),
         verdict=evaluate_gate((), resolution=resolution),
         status=RunStatus.COMPLETED,
+        severity_map_version=_MAP_VERSION,
     )
 
     report = _render(result)
@@ -227,6 +231,7 @@ def test_policy_override_falls_back_to_a_generic_trigger_when_fail_on_is_none() 
         findings=(),
         verdict=evaluate_gate((), resolution=resolution),
         status=RunStatus.COMPLETED,
+        severity_map_version=_MAP_VERSION,
     )
 
     report = _render(result)
@@ -258,6 +263,7 @@ def test_policy_override_names_a_replaced_category_table_too() -> None:
         findings=(),
         verdict=evaluate_gate((), resolution=resolution),
         status=RunStatus.COMPLETED,
+        severity_map_version=_MAP_VERSION,
     )
 
     report = _render(result)
@@ -282,6 +288,7 @@ def test_report_names_the_category_table_that_produced_its_thresholds() -> None:
         findings=(),
         verdict=evaluate_gate((), resolution=resolution),
         status=RunStatus.COMPLETED,
+        severity_map_version=_MAP_VERSION,
     )
 
     report = _render(result)
@@ -299,6 +306,7 @@ def test_report_names_the_default_table_for_a_category_without_its_own() -> None
         findings=(),
         verdict=evaluate_gate((), resolution=resolution),
         status=RunStatus.COMPLETED,
+        severity_map_version=_MAP_VERSION,
     )
 
     report = _render(result)

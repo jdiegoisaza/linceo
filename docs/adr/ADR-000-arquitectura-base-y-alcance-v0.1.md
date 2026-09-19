@@ -733,7 +733,11 @@ disponible primero":
 
 1. **Override del cliente.** Decisión humana explícita sobre un `(herramienta,
    rule_id)` concreto; gana siempre sobre cualquier señal automática. Vive en la
-   configuración de cliente (R5), nunca en este repositorio.
+   configuración de cliente (R5), nunca en este repositorio — modelado en código
+   desde el primer `SeverityNormalizer` (`overrides`), pero sin todavía un camino
+   real desde `.devsecops/config.toml` hasta ese campo; aplazado explícitamente
+   en §14, junto con la pregunta más amplia de si `severity_map.toml` completo
+   debería poder extenderse o sobrescribirse desde ese mismo documento.
 2. **Severidad nativa de la herramienta**, si existe y no es `UNKNOWN`. Se prefiere
    sobre CVSS porque suele codificar contexto de advisory específico del proveedor
    —severidad ajustada por distro, backports de parches ya aplicados aguas arriba—
@@ -2084,3 +2088,4 @@ cueste, en la práctica, un único `docker run` sin instalación previa de nada.
 | Proveedores de contexto para GitHub Actions y GitLab CI (§1, §10) | Demanda concreta de un usuario en esa plataforma; el contrato ya está validado con dos proveedores de máxima distancia, así que el trabajo restante es de adaptador, no de diseño. |
 | Escaneo de imágenes de contenedor en la integración de Trivy (§10) | Que el caso de uso offline-first quede suficientemente probado en producción como para justificar introducir el primer camino con credenciales de red del proyecto. |
 | Obtención remota del documento de política (§8.4) | Un usuario real con más de un repositorio necesitando compartir el mismo documento sin copiarlo a mano — el esquema ya está diseñado para que esta pieza sea plomería, no rediseño. |
+| Sobrescribir o extender `severity_map.toml` (mapa nativo, defaults por categoría/regla) desde el documento de política del cliente (§6, §8.4) — distinto de `SeverityNormalizer.overrides` (tier 1, por `(herramienta, rule_id)`), que ya existe en el modelo pero tampoco tiene todavía un camino desde `.devsecops/config.toml` hasta él | Un usuario real necesitando ajustar la severidad de un valor nativo o de una regla concreta sin esperar un release de linceo que actualice el fichero empaquetado. |

@@ -2,9 +2,16 @@
 
 Deliberately thin (ADR §13.1), the same way `linceo.adapters.gitleaks` is:
 builds the `trivy fs` command line and parses its JSON report into
-`RawFinding`s, nothing more — no severity normalization of its own (`SeverityNormalizer`'s
-job, ADR §6) beyond declaring `TRIVY_NATIVE_SEVERITY_MAP` and
-`TRIVY_NATIVE_SEVERITY_DOMAIN`, the versioned data a caller feeds it.
+`RawFinding`s, nothing more — no severity normalization of its own
+(`SeverityNormalizer`'s job, ADR §6): the native-value-to-`Severity` map
+itself lives in the versioned `linceo/data/severity_map.toml` (ADR §6),
+not here. This module only declares `TRIVY_NATIVE_SEVERITY_DOMAIN` — the
+complete set of native values trivy can produce, a fact about the tool's
+own CLI, confirmed against its `--help` output, independent of how any of
+those values gets mapped — and reads `cvss_source_preference` (also from
+that same file, threaded in by the caller that constructs this
+integration) to pick one CVSS v3.1 base score deterministically when
+trivy reports more than one source for the same finding.
 
 `--scanners vuln` is always passed, never left to trivy's own default
 (`vuln,secret`): this integration's category is `sca`, and this project
@@ -34,7 +41,6 @@ from linceo.core.execution import DataSource, ToolExecutionError
 from linceo.core.findings import Category, Location, Package, RawFinding
 from linceo.core.ports import ProcessResult, ToolExecutor
 from linceo.core.report_schema import Column, ReportSchema
-from linceo.core.severity import Severity
 from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError, render_passthrough_flags
 
 #: The `sca` category's report table contract (ADR §7): `LOCATION` is
@@ -55,9 +61,9 @@ _REPORT_SCHEMA = ReportSchema(
 TRIVY_BINARY = "trivy"
 
 #: `RawFinding.tool` / `ToolIntegration.name` for this integration — pulled
-#: into its own constant because, unlike gitleaks, this value is also part
-#: of `TRIVY_NATIVE_SEVERITY_MAP`'s keys below; duplicating the literal in
-#: both places would risk them drifting apart silently.
+#: into its own constant because it is also the key `[native.trivy]` in
+#: `severity_map.toml` is keyed by; duplicating the literal in both places
+#: would risk them drifting apart silently.
 TRIVY_TOOL_NAME = "trivy"
 
 #: The version range this integration's JSON parsing was built and golden-
@@ -118,34 +124,16 @@ TRIVY_NATIVE_SEVERITY_DOMAIN: frozenset[str] = frozenset(
     {"UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
 )
 
-#: The native-severity half of ADR §6's precedence chain for trivy.
-#: Deliberately maps only four of `TRIVY_NATIVE_SEVERITY_DOMAIN`'s five
-#: values — `UNKNOWN` is left out on purpose, not an oversight the
-#: completeness test in `linceo.core.severity` would have caught: trivy
-#: itself defines `UNKNOWN` as "no severity signal was available", so
-#: mapping it to a `Severity` here would short-circuit
-#: `SeverityNormalizer.resolve`'s next step, a CVSS base score, before it
-#: ever runs — exactly the case ADR §6 documents trivy's own two-signal
-#: design (native severity *and*, separately, a CVSS score) for. A finding
-#: whose native value really is `UNKNOWN` and carries no usable CVSS score
-#: either still resolves, safely, through the same category-default/fallback
-#: chain every other unresolved finding does (ADR §6).
-TRIVY_NATIVE_SEVERITY_MAP: Mapping[tuple[str, str], Severity] = {
-    (TRIVY_TOOL_NAME, "LOW"): Severity.LOW,
-    (TRIVY_TOOL_NAME, "MEDIUM"): Severity.MEDIUM,
-    (TRIVY_TOOL_NAME, "HIGH"): Severity.HIGH,
-    (TRIVY_TOOL_NAME, "CRITICAL"): Severity.CRITICAL,
-}
-
-#: ADR §6: "cuando hay varias fuentes de CVSS disponibles... el orden de
-#: preferencia entre fuentes se declara explícitamente" — this constant is
-#: that declaration for trivy, using the ADR's own worked example (NVD
-#: before a distro/vendor advisory) rather than inventing a new one. Any
-#: source trivy reports that isn't this one is tried next, in a fixed,
-#: alphabetically sorted order — never dict iteration order — so the same
-#: report always yields the same choice (ADR R3) even for a source this
-#: constant doesn't name.
-_PREFERRED_CVSS_SOURCE = "nvd"
+#: `TrivyIntegration.cvss_source_preference`'s own default, for a caller
+#: that constructs one without threading in `severity_map.toml`'s own
+#: `cvss_source_preference` (ADR §6) — matches that file's shipped value,
+#: so a bare `TrivyIntegration(version=...)` (every existing test, and any
+#: future caller that does not care to override it) behaves identically to
+#: one built the real way, through the loaded map. ADR §6: "cuando hay
+#: varias fuentes de CVSS disponibles... el orden de preferencia entre
+#: fuentes se declara explícitamente" — NVD before a distro/vendor
+#: advisory is the ADR's own worked example, not a new one invented here.
+DEFAULT_CVSS_SOURCE_PREFERENCE: tuple[str, ...] = ("nvd",)
 
 
 class TrivyOutputError(Exception):
@@ -171,19 +159,26 @@ class TrivyDatabaseNotReadyError(ToolExecutionError):
     """
 
 
-def _extract_cvss_score(cvss: Mapping[str, object]) -> float | None:
+def _extract_cvss_score(
+    cvss: Mapping[str, object], *, preferred_sources: Sequence[str]
+) -> float | None:
     """Pick one CVSS v3.1 base score from trivy's per-source `CVSS` map, deterministically.
 
-    Tries `_PREFERRED_CVSS_SOURCE` first, then every other source trivy
-    reported, in alphabetically sorted order — never dict iteration order
-    (ADR R3) — returning the first `V3Score` found. A source with only a
-    `V2Score`, or a `V40Score` (CVSS v4) but no `V3Score`, is skipped:
+    Tries each of `preferred_sources` in order, then every other source
+    trivy reported that isn't already in it, in alphabetically sorted
+    order — never dict iteration order (ADR R3) — returning the first
+    `V3Score` found. `preferred_sources` is `severity_map.toml`'s own
+    `cvss_source_preference` (ADR §6: "el orden de preferencia entre
+    fuentes se declara explícitamente en el propio fichero de mapa"),
+    threaded in via `TrivyIntegration.cvss_source_preference` — this
+    function itself declares no preference of its own. A source with only
+    a `V2Score`, or a `V40Score` (CVSS v4) but no `V3Score`, is skipped:
     `Severity.from_cvss` buckets CVSS v3.1 specifically (ADR §6), and mixing
     scales in would make the bucketing meaningless.
     """
     ordered_sources = (
-        _PREFERRED_CVSS_SOURCE,
-        *sorted(source for source in cvss if source != _PREFERRED_CVSS_SOURCE),
+        *preferred_sources,
+        *sorted(source for source in cvss if source not in preferred_sources),
     )
     for source in ordered_sources:
         block = cvss.get(source)
@@ -204,10 +199,15 @@ class TrivyIntegration:
     both called on the class itself before this integration is
     constructed (ADR R4) — rather than hardcoded or looked up lazily, the
     same pattern `GitleaksIntegration.version` establishes.
+    `cvss_source_preference` is `severity_map.toml`'s own
+    `cvss_source_preference` (ADR §6), likewise supplied by the caller —
+    this integration has no CVSS-source opinion of its own beyond
+    `DEFAULT_CVSS_SOURCE_PREFERENCE`, its neutral default.
     """
 
     version: str
     db_data_sources: tuple[DataSource, ...] = ()
+    cvss_source_preference: tuple[str, ...] = DEFAULT_CVSS_SOURCE_PREFERENCE
     name: str = TRIVY_TOOL_NAME
     category: Category = Category.SCA
 
@@ -453,7 +453,11 @@ class TrivyIntegration:
             raise TrivyOutputError(msg)
 
         cvss = entry.get("CVSS")
-        cvss_score = _extract_cvss_score(cvss) if isinstance(cvss, Mapping) else None
+        cvss_score = (
+            _extract_cvss_score(cvss, preferred_sources=self.cvss_source_preference)
+            if isinstance(cvss, Mapping)
+            else None
+        )
 
         message = str(entry.get("Title") or entry.get("Description") or vulnerability_id)
 
@@ -491,12 +495,12 @@ class TrivyIntegration:
 
 
 __all__ = [
+    "DEFAULT_CVSS_SOURCE_PREFERENCE",
     "SUPPORTED_VERSION_RANGE",
     "TRIVY_BINARY",
     "TRIVY_DB_NOT_READY_HINT",
     "TRIVY_MISSING_BINARY_HINT",
     "TRIVY_NATIVE_SEVERITY_DOMAIN",
-    "TRIVY_NATIVE_SEVERITY_MAP",
     "TRIVY_TOOL_NAME",
     "TRIVY_VULNERABILITY_DB_NAME",
     "TrivyDatabaseNotReadyError",
