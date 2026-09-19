@@ -123,3 +123,70 @@ jobs:
         with:
           name: linceo-secrets-sarif
           path: linceo-secrets.sarif
+
+  sca:
+    name: SCA scan
+    runs-on: ubuntu-latest
+    env:
+      TRIVY_VERSION: "0.74.0"
+      # Copied verbatim from trivy's own published
+      # trivy_${TRIVY_VERSION}_checksums.txt entry for this release (the
+      # amd64 Linux asset) — the same version, and the same
+      # checksum-verification practice, the reference container image pins
+      # (ADR R4, Dockerfile).
+      TRIVY_SHA256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a"
+    steps:
+      # No fetch-depth: 0 here, unlike the "secrets" job — trivy's `fs`
+      # scanner reads the checked-out manifest (`uv.lock`) as it stands,
+      # never git history, so the default shallow checkout is enough.
+      - uses: actions/checkout@v7
+
+      - name: Install trivy (pinned, checksum-verified)
+        run: |
+          set -eu
+          curl -fsSL -o trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          printf '%s  trivy.tar.gz\n' "${TRIVY_SHA256}" > trivy.tar.gz.sha256
+          sha256sum -c trivy.tar.gz.sha256
+          tar -xzf trivy.tar.gz trivy
+          chmod 0755 trivy
+          sudo mv trivy /usr/local/bin/trivy
+          rm -f trivy.tar.gz trivy.tar.gz.sha256
+          trivy version
+
+      - name: Compute today's date for the vulnerability-db cache key
+        id: date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache trivy's vulnerability database
+        id: trivy-db-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.date.outputs.date }}
+          restore-keys: trivy-db-
+
+      - name: Fetch trivy's vulnerability database
+        # `linceo scan sca` always runs trivy with `--skip-db-update`
+        # (ADR R2/§5: offline by default) — it never fetches a database on
+        # its own. This is the one deliberate, explicit network call this
+        # job makes, the same one the reference container image's own
+        # build step makes (Dockerfile); skipped on a cache hit so a warm
+        # cache is never re-downloaded needlessly.
+        if: steps.trivy-db-cache.outputs.cache-hit != 'true'
+        run: trivy fs --download-db-only .
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+
+      - name: linceo scan sca (dogfooding this project's own tool)
+        run: uv run linceo scan sca --format sarif > linceo-sca.sarif
+
+      - name: Upload SARIF
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linceo-sca-sarif
+          path: linceo-sca.sarif

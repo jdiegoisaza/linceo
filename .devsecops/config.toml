@@ -6,13 +6,46 @@
 # is gitleaks' own equivalent for this same repository.
 version = 1
 
-# Equivalent strictness to what `gitleaks-action` enforced before this CI
-# job started calling linceo instead: it failed the job on any leak found,
-# with no severity concept of its own. Every `secrets` finding is at least
-# HIGH by category default (ADR §6 — gitleaks emits no native severity), so
-# `fail_on = "high"` blocks on the same set of findings `gitleaks-action`
-# did, never more permissively.
-fail_on = "high"
+# Per-category thresholds (ADR §8.1), not one global `fail_on`: secrets
+# and dependency vulnerabilities are not the same kind of risk, and a
+# single cutoff forces a choice between too lax on one or too strict on
+# the other — exactly the problem that motivated adding this mechanism.
+
+[thresholds.secrets]
+# Zero tolerance on both severities gitleaks can produce through this
+# integration. Gitleaks emits no native severity — the category default is
+# always HIGH (ADR §6) — so there is nothing below HIGH to leave
+# unconstrained: a real secret committed to linceo's own source is exactly
+# the scenario this project exists to catch in someone else's. Equivalent
+# strictness to what `gitleaks-action` enforced before this CI job started
+# calling linceo instead (it failed the job on any leak found, with no
+# severity concept of its own) — same set of findings blocks, never more
+# permissively, just explicit per category now instead of a global
+# `fail_on = "high"`.
+critical = 0
+high = 0
+
+[thresholds.sca]
+# CRITICAL/HIGH sit at the same zero-tolerance floor as `secrets` —
+# severity means the same thing regardless of which category produced it
+# (ADR §6): an exploitable CVE in a dependency, even a transitive one,
+# demands the same immediate decision a leaked secret does.
+critical = 0
+high = 0
+# `medium` is deliberately left unconstrained. ADR §6 defines MEDIUM as
+# "real, pero acotado en impacto... se registra, no bloquea por defecto" —
+# a transitive dependency accumulates MEDIUM findings routinely, and
+# blocking on every one would train the team to raise the threshold until
+# it is ignored, the same trap §6 already describes for secrets. This is
+# the actual difference between "strict" and "with margin": not how severe
+# a finding has to be to matter, but how far down the scale gets room —
+# CRITICAL/HIGH stay just as strict here as they are for secrets.
+#
+# The scan itself (`trivy fs`) covers only runtime dependencies by
+# default — trivy suppresses development/test ones unless
+# `--include-dev-deps` is passed, which this document does not — so what
+# this threshold actually protects is what a real `pip install linceo`
+# inherits, not this repository's own development toolchain.
 
 [tools.gitleaks]
 # Keeps `.gitleaks.toml`'s own [extend]/[allowlist] — the synthetic-fixture
