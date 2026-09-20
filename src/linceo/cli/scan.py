@@ -10,7 +10,10 @@ downstream of constructing their own `ToolIntegration` instance — resolving
 configuration, merging `ToolConfig`, `--dry-run`, calling `run`, error
 handling, and reporting — through `_run_scan`, so that shared plumbing
 exists exactly once instead of drifting between the two commands now that
-there are two.
+there are two. `_load_resolved_config` also resolves this run's
+`[remote_policy]` declaration, if any, before calling `load_config` (ADR
+R2, §8.4) — no CLI flag of its own: the declaration lives entirely in the
+local `.devsecops/config.toml` this same call already resolves.
 """
 
 import shlex
@@ -25,7 +28,7 @@ import typer
 from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.adapters.subprocess_executor import SubprocessToolExecutor
 from linceo.adapters.trivy import TrivyIntegration, TrivyOutputError
-from linceo.core.config import Config, ConfigurationError, load_config
+from linceo.core.config import Config, ConfigurationError, load_config, resolve_local_document
 from linceo.core.context import ContextResolutionError, Platform
 from linceo.core.engine import run
 from linceo.core.execution import DataSource
@@ -33,12 +36,19 @@ from linceo.core.exit_codes import EXIT_CONFIGURATION_ERROR, compute_exit_code
 from linceo.core.findings import Category
 from linceo.core.normalization import SeverityNormalizer
 from linceo.core.policy import PolicyConfigurationError
-from linceo.core.ports import ContextProvider, ToolExecutor, ToolIntegration
+from linceo.core.ports import ContextProvider, PolicySource, ToolExecutor, ToolIntegration
+from linceo.core.remote_policy import (
+    PolicySourceStatus,
+    RemotePolicyDeclaration,
+    default_cache_dir,
+    parse_remote_policy_declaration,
+    resolve_remote_policy_document,
+)
 from linceo.core.reporters import render_console, render_json
 from linceo.core.sarif import render_sarif
 from linceo.core.severity_map import load_severity_map
 from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError, resolve_tool_config
-from linceo.providers.azure_devops import AzureDevOpsContextProvider
+from linceo.providers.azure_devops import AzureDevOpsContextProvider, AzureDevOpsPolicySource
 from linceo.providers.detection import detect_platform
 from linceo.providers.environment import process_environment
 from linceo.providers.local import LocalContextProvider
@@ -175,6 +185,59 @@ def _cli_overrides(
     return overrides
 
 
+def _build_policy_source(declaration: RemotePolicyDeclaration) -> PolicySource:
+    """Construct the concrete `PolicySource` for `declaration` (today: Azure DevOps only, ADR §10).
+
+    The only reference implementation, the same way `local`+`azure_devops`
+    are today's only two `ContextProvider`s — hardcoded here rather than
+    resolved through `linceo.core.registry`'s plugin mechanism, exactly the
+    same way `resolve_context_provider` above hardcodes its own two
+    choices: that registry exists for *third-party* plugins, not for this
+    project's own reference adapters.
+    """
+    return AzureDevOpsPolicySource(
+        repository=declaration.repository,
+        path=declaration.path,
+        project=declaration.project,
+        token_env=declaration.token_env,
+    )
+
+
+def _resolve_remote_policy(
+    *, config_path: Path | None, workspace_path: str, env: Mapping[str, str], now: datetime
+) -> tuple[Mapping[str, object] | None, PolicySourceStatus | None]:
+    """Resolve this run's `[remote_policy]` declaration, if any, into a mapping to merge in.
+
+    `(None, None)` when the local document declares no `remote_policy`
+    table at all — the common case, and the only one every `scan <category>`
+    invocation hit before this existed. A *fetch* failure never raises from
+    here: `resolve_remote_policy_document` already turns it into a
+    degraded `PolicySourceStatus` on its own (ADR §5, §8.4) — only a
+    malformed local `[remote_policy]` table itself propagates, the same as
+    any other invalid part of the local document.
+
+    Raises:
+        PolicyConfigurationError: see
+            `linceo.core.remote_policy.parse_remote_policy_declaration`.
+        ConfigurationError: see `linceo.core.config.resolve_local_document`.
+    """
+    _, local_document = resolve_local_document(
+        explicit_config_path=str(config_path) if config_path is not None else None,
+        workspace_path=workspace_path,
+        package_root=package_root(),
+    )
+    declaration = parse_remote_policy_declaration(local_document)
+    if declaration is None:
+        return None, None
+
+    return resolve_remote_policy_document(
+        source=_build_policy_source(declaration),
+        declaration=declaration,
+        cache_dir=default_cache_dir(env),
+        now=now,
+    )
+
+
 def _load_resolved_config(
     *,
     cli_overrides: dict[str, str],
@@ -183,8 +246,17 @@ def _load_resolved_config(
     workspace_path: str,
     now: datetime,
 ) -> Config:
-    """`load_config`, translating `ConfigurationError` into the CLI's exit-2 contract (ADR §8)."""
+    """`load_config`, translating `ConfigurationError` into the CLI's exit-2 contract (ADR §8).
+
+    Resolves this run's `[remote_policy]` declaration first (ADR R2, §8.4,
+    `_resolve_remote_policy`) and feeds its outcome into `load_config`,
+    which merges it into the local document per its own governance rules
+    (`linceo.core.remote_policy.merge_remote_into_local`).
+    """
     try:
+        remote_document, policy_source = _resolve_remote_policy(
+            config_path=config_path, workspace_path=workspace_path, env=env, now=now
+        )
         return load_config(
             cli_overrides=cli_overrides,
             env=env,
@@ -192,8 +264,10 @@ def _load_resolved_config(
             workspace_path=workspace_path,
             package_root=package_root(),
             today=now.date(),
+            remote_document=remote_document,
+            policy_source=policy_source,
         )
-    except ConfigurationError as exc:
+    except (ConfigurationError, PolicyConfigurationError) as exc:
         typer.echo(f"Configuration error: {exc}", err=True)
         raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
 

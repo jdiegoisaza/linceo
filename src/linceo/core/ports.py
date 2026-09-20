@@ -1,13 +1,13 @@
-"""The three port contracts the orchestrator depends on (ADR §1).
+"""The port contracts the orchestrator depends on (ADR §1, R2, §8.4).
 
-`ContextProvider`, `ToolExecutor`, and `ToolIntegration` are
+`ContextProvider`, `ToolExecutor`, `ToolIntegration`, and `PolicySource` are
 `typing.Protocol` definitions, not base classes — a concrete
 adapter satisfies a port by structure, without importing `core` at runtime
 or subclassing anything here. Concrete implementations live in
 `linceo.adapters` (`ToolIntegration`) and `linceo.providers`
-(`ContextProvider`); `linceo.testing` carries the permanent fakes
-(`FakeContextProvider`, `FakeToolExecutor`) that exercise these same
-contracts (ADR §11).
+(`ContextProvider`, `PolicySource`); `linceo.testing` carries the permanent
+fakes (`FakeContextProvider`, `FakeToolExecutor`, `FakePolicySource`) that
+exercise these same contracts (ADR §11).
 """
 
 from __future__ import annotations
@@ -221,5 +221,86 @@ class ToolIntegration(Protocol):
         where a category's `LOCATION` shape and extra columns (e.g. `sca`'s
         `MANIFEST`/`FIXED`) enter the pipeline as data, not as rendering
         code.
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class FetchedPolicy:
+    """The raw content a `PolicySource` fetched, before it is even parsed as TOML (ADR R2, §8.4).
+
+    Deliberately just `content: str` — no metadata about *how* it was
+    fetched (an HTTP status, a response header, an SDK-specific object):
+    `linceo.core.remote_policy` decides `fetched_at` itself (the resolving
+    caller's own `now`, ADR R3), never a timestamp a concrete `PolicySource`
+    reports about itself, so every source behaves identically from `core`'s
+    point of view regardless of which platform or HTTP client produced this.
+    """
+
+    content: str
+
+
+@runtime_checkable
+class PolicySource(Protocol):
+    """Fetches one remote policy document's current raw content by name (ADR R2, §8.4).
+
+    Optional, in every sense R2 already establishes for remote configuration:
+    a run with no `[remote_policy]` declared never constructs one at all, and
+    even a configured one requires the `linceo[remote-config]` extra to
+    actually succeed — the base package depends on no HTTP client, and this
+    Protocol itself imports nothing beyond the standard library, so it is
+    satisfiable (as a type) whether or not that extra is installed.
+
+    A concrete implementation resolves *where* the named document lives
+    itself — "reference by name, not by URL" (ADR §8.4): the caller supplies
+    only a repository name and a path within it, mirroring how
+    `ContextProvider` resolves an `ExecutionContext` from platform-specific
+    inputs the port itself never sees. `linceo.providers.azure_devops`'s
+    `AzureDevOpsPolicySource` is the one reference implementation, reading
+    the build's own organization from the process environment exactly as
+    `AzureDevOpsContextProvider` reads everything else about that build.
+    """
+
+    def fetch(self) -> FetchedPolicy:
+        """Fetch the named document's current content.
+
+        Raises:
+            linceo.core.remote_policy.RemotePolicyFetchError: on *any*
+                failure to reach or read the source — a network error, a
+                missing auth token, a 404, an unparseable response, the
+                `linceo[remote-config]` extra not being installed — never a
+                lower-level exception type (an HTTP client's own exception
+                class, e.g.), so `linceo.core.remote_policy` can catch one
+                exception type regardless of which concrete source or HTTP
+                client produced it, and treat every one of these causes the
+                same way: a failed fetch to degrade from (ADR §5, §8.4).
+        """
+        ...
+
+    def cache_key(self) -> str:
+        """A filesystem-safe string uniquely identifying the real-world location `fetch` reads.
+
+        Deliberately distinct from a repository *name* (ADR §8.4's
+        "referencia por nombre, no por URL"): a name alone is not unique
+        across the platforms and organizations a single self-hosted agent
+        pool can serve. Two `RemotePolicyDeclaration`s naming the same
+        repository in two different organizations, or two different
+        projects of the same organization, must never resolve to the same
+        `cache_key` — an agent shared across those tenants would otherwise
+        silently serve one team's cached policy document to another's
+        pipeline the moment its own fetch failed (ADR §8.4).
+        `AzureDevOpsPolicySource.cache_key` hashes organization, project,
+        repository, and path together, resolving organization and project
+        through the exact same helper `fetch` itself uses, so the two can
+        never disagree about where this source actually points.
+
+        Raises:
+            linceo.core.remote_policy.RemotePolicyFetchError: under the
+                same conditions `fetch` itself raises for being unable to
+                resolve this source's location (e.g. a required environment
+                variable is absent) — never a lower-level exception type,
+                matching `fetch`'s own contract. A caller unable to compute
+                this treats the source as having no cache to read from or
+                write to at all, rather than guessing at one.
         """
         ...

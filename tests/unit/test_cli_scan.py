@@ -27,8 +27,9 @@ from linceo.core.exit_codes import (
     EXIT_TOOL_EXECUTION_FAILED,
 )
 from linceo.core.fingerprint import secret_fingerprint
-from linceo.core.ports import ProcessResult
-from linceo.testing import FakeToolExecutor
+from linceo.core.ports import FetchedPolicy, ProcessResult
+from linceo.core.remote_policy import RemotePolicyFetchError
+from linceo.testing import FakePolicySource, FakeToolExecutor
 
 runner = CliRunner()
 _NOW = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
@@ -382,6 +383,87 @@ def test_policy_file_exclusion_suppresses_a_finding_and_it_no_longer_fails_the_g
 
     assert "Suppressed by policy: 1" in result.output
     assert result.exit_code == EXIT_OK
+
+
+def test_remote_policy_thresholds_govern_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR R2, §8.4: a fetched remote document's `[thresholds]` replaces the local file's own."""
+    repo = _init_repo(tmp_path / "widgets")
+    stdout = (_FIXTURES / "one_finding.json").read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        "linceo.cli.scan.SubprocessToolExecutor",
+        _stub_executor_factory(
+            {
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
+                    exit_code=1, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
+                ),
+            }
+        ),
+    )
+    monkeypatch.setenv("LINCEO_POLICY_CACHE_DIR", str(tmp_path / "policy-cache"))
+    monkeypatch.setattr(
+        "linceo.cli.scan.AzureDevOpsPolicySource",
+        lambda **_kwargs: FakePolicySource(
+            outcome=FetchedPolicy(content="[thresholds]\nhigh = 0\n")
+        ),
+    )
+    config_path = tmp_path / "policy.toml"
+    # No `--fail-on`, and the local file declares no gate of its own either — the
+    # remote document's `[thresholds]` is the only thing that turns the gate on.
+    config_path.write_text('[remote_policy]\nrepository = "security-baseline"\n')
+
+    result = runner.invoke(
+        app, ["scan", "secrets", "--path", str(repo), "--config", str(config_path)]
+    )
+
+    assert result.exit_code == EXIT_GATE_FAILED
+    assert "Remote policy: security-baseline/policy.toml — fetched fresh this run" in result.output
+    assert "Gate: FAILED" in result.output
+
+
+def test_remote_policy_fetch_failure_degrades_to_the_local_document_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR §5, §8.4: a failed fetch with no cache never fails the run — it warns and continues."""
+    repo = _init_repo(tmp_path / "widgets")
+    stdout = (_FIXTURES / "empty.json").read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        "linceo.cli.scan.SubprocessToolExecutor",
+        _stub_executor_factory(
+            {
+                ("gitleaks", "version"): _VERSION_RESULT,
+                ("gitleaks", "detect"): ProcessResult(
+                    exit_code=0, stdout=stdout, stderr="", started_at=_NOW, finished_at=_NOW
+                ),
+            }
+        ),
+    )
+    monkeypatch.setenv("LINCEO_POLICY_CACHE_DIR", str(tmp_path / "policy-cache"))
+    monkeypatch.setattr(
+        "linceo.cli.scan.AzureDevOpsPolicySource",
+        lambda **_kwargs: FakePolicySource(outcome=RemotePolicyFetchError("401 unauthorized")),
+    )
+    config_path = tmp_path / "policy.toml"
+    config_path.write_text('[remote_policy]\nrepository = "security-baseline"\n')
+
+    result = runner.invoke(
+        app,
+        [
+            "scan",
+            "secrets",
+            "--path",
+            str(repo),
+            "--config",
+            str(config_path),
+            "--fail-on",
+            "high",
+        ],
+    )
+
+    assert result.exit_code == EXIT_OK
+    assert "WARN: unreachable and no cached copy (401 unauthorized)" in result.output
 
 
 def test_continue_on_tool_error_overrides_a_missing_binary_to_exit_ok(

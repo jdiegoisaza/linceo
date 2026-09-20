@@ -1,0 +1,307 @@
+"""Tests for `AzureDevOpsPolicySource` (ADR R2, §8.4): the reference `PolicySource`.
+
+`httpx.get` is monkeypatched directly rather than run against a real
+service — this module never needs network access to verify the request
+this class builds, the header it authenticates with, and how it translates
+every failure into `RemotePolicyFetchError` (ADR §5's "one exception type"
+contract, see `linceo.core.ports.PolicySource.fetch`).
+"""
+
+from __future__ import annotations
+
+import builtins
+import logging
+from collections.abc import Generator, Mapping
+from dataclasses import dataclass, field
+
+import httpx
+import pytest
+
+from linceo.core.remote_policy import RemotePolicyFetchError
+from linceo.providers.azure_devops import AzureDevOpsPolicySource
+
+_ENV_VARS = ("SYSTEM_COLLECTIONURI", "SYSTEM_TEAMPROJECT", "MY_TOKEN")
+
+
+@pytest.fixture(autouse=True)
+def _clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in _ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _clean_http_client_log_filters() -> Generator[None]:
+    """Undo `fetch`'s own `logging.getLogger("httpx"/"httpcore").addFilter(...)` (ADR §9).
+
+    Those two loggers are process-wide singletons — a filter `fetch` installs
+    in one test would otherwise persist into every test that runs after it
+    in the same session.
+    """
+    yield
+    logging.getLogger("httpx").filters.clear()
+    logging.getLogger("httpcore").filters.clear()
+
+
+@dataclass(slots=True)
+class _FakeResponse:
+    text: str
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+@dataclass(slots=True)
+class _CapturingGet:
+    """Records every call it receives and returns a fixed `_FakeResponse`."""
+
+    response_text: str = "version = 1\n"
+    calls: list[tuple[str, Mapping[str, str], Mapping[str, str]]] = field(default_factory=list)
+
+    def __call__(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+        timeout: float,  # noqa: ARG002 -- part of httpx.get's call shape, unused by this fake
+    ) -> _FakeResponse:
+        self.calls.append((url, params, headers))
+        return _FakeResponse(self.response_text)
+
+
+def test_fetch_requires_the_organization_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError, match="SYSTEM_COLLECTIONURI"):
+        source.fetch()
+
+
+def test_fetch_requires_a_project_from_declaration_or_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError, match="project"):
+        source.fetch()
+
+
+def test_fetch_defaults_the_project_to_the_builds_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "widgets")
+    capturing_get = _CapturingGet()
+    monkeypatch.setattr(httpx, "get", capturing_get)
+
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+    fetched = source.fetch()
+
+    assert fetched.content == "version = 1\n"
+    [(url, params, _headers)] = capturing_get.calls
+    assert (
+        url == "https://dev.azure.com/acme/widgets/_apis/git/repositories/security-baseline/items"
+    )
+    assert params == {"path": "policy.toml", "download": "true", "api-version": "7.1"}
+
+
+def test_fetch_prefers_the_declared_project_over_the_builds_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "widgets")
+    capturing_get = _CapturingGet()
+    monkeypatch.setattr(httpx, "get", capturing_get)
+
+    source = AzureDevOpsPolicySource(
+        repository="security-baseline", path="policy.toml", project="platform-security"
+    )
+    source.fetch()
+
+    [(url, _params, _headers)] = capturing_get.calls
+    assert "/platform-security/" in url
+
+
+def test_fetch_with_no_token_env_sends_no_authorization_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    capturing_get = _CapturingGet()
+    monkeypatch.setattr(httpx, "get", capturing_get)
+
+    AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml").fetch()
+
+    [(_url, _params, headers)] = capturing_get.calls
+    assert headers == {}
+
+
+def test_fetch_sends_the_token_as_a_bearer_header_never_in_the_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    monkeypatch.setenv("MY_TOKEN", "super-secret-value")
+    capturing_get = _CapturingGet()
+    monkeypatch.setattr(httpx, "get", capturing_get)
+
+    source = AzureDevOpsPolicySource(
+        repository="security-baseline",
+        path="policy.toml",
+        token_env="MY_TOKEN",  # noqa: S106 -- an env var *name*, not a credential value (ADR §9)
+    )
+    source.fetch()
+
+    [(url, params, headers)] = capturing_get.calls
+    assert headers == {"Authorization": "Bearer super-secret-value"}
+    assert "super-secret-value" not in url
+    assert "super-secret-value" not in str(params)
+
+
+def test_fetch_wraps_any_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+
+    def _raising_get(*_args: object, **_kwargs: object) -> _FakeResponse:
+        raise httpx.HTTPError("connection refused")
+
+    monkeypatch.setattr(httpx, "get", _raising_get)
+
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError, match="security-baseline/policy"):
+        source.fetch()
+
+
+def test_fetch_without_the_remote_config_extra_installed_is_an_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    real_import = builtins.__import__
+
+    def _import_without_httpx(name: str, *args: object, **kwargs: object) -> object:
+        if name == "httpx":
+            raise ImportError("no module named httpx")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", _import_without_httpx)
+
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError, match="remote-config"):
+        source.fetch()
+
+
+# --- cache_key: the cross-tenant collision fix (ADR §9) -------------------------
+
+
+def test_cache_key_requires_the_organization_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError, match="SYSTEM_COLLECTIONURI"):
+        source.cache_key()
+
+
+def test_cache_key_requires_a_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError, match="project"):
+        source.cache_key()
+
+
+def test_cache_key_is_deterministic_for_the_same_location(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    assert source.cache_key() == source.cache_key()
+
+
+def test_cache_key_differs_across_organizations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The regression this guards: the same declared name in two orgs must never collide."""
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/org-a/")
+    key_a = source.cache_key()
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/org-b/")
+    key_b = source.cache_key()
+
+    assert key_a != key_b
+
+
+def test_cache_key_differs_across_projects_of_the_same_organization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "team-a")
+    key_a = source.cache_key()
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "team-b")
+    key_b = source.cache_key()
+
+    assert key_a != key_b
+
+
+def test_cache_key_agrees_with_fetch_about_which_project_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit `project` override changes the key exactly as it changes the URL `fetch` uses."""
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "widgets")
+    default_project = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+    overridden_project = AzureDevOpsPolicySource(
+        repository="security-baseline", path="policy.toml", project="platform-security"
+    )
+
+    assert default_project.cache_key() != overridden_project.cache_key()
+
+
+# --- defense in depth against a third-party library's own logging (ADR §9) -----
+
+
+def test_fetch_installs_a_redaction_filter_that_catches_a_hypothetical_header_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpcore does not currently log request headers (verified by reading its source, see the
+    ADR amendment) — this proves the second, independent layer actually works regardless, by
+    simulating the one hypothetical it exists to guard against."""
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    monkeypatch.setenv("MY_TOKEN", "super-secret-value")
+
+    httpcore_logger = logging.getLogger("httpcore")
+    httpcore_logger.setLevel(logging.DEBUG)
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append  # type: ignore[assignment]
+    httpcore_logger.addHandler(handler)
+
+    def _get_that_logs_its_own_headers(
+        url: str,
+        *,
+        params: Mapping[str, str],  # noqa: ARG001 -- part of httpx.get's call shape, unused here
+        headers: Mapping[str, str],
+        timeout: float,  # noqa: ARG001 -- part of httpx.get's call shape, unused here
+    ) -> _FakeResponse:
+        httpcore_logger.debug("send_request_headers request=%r headers=%r", url, headers)
+        return _FakeResponse("version = 1\n")
+
+    monkeypatch.setattr(httpx, "get", _get_that_logs_its_own_headers)
+
+    try:
+        source = AzureDevOpsPolicySource(
+            repository="security-baseline",
+            path="policy.toml",
+            token_env="MY_TOKEN",  # noqa: S106 -- an env var *name*, not a credential (ADR §9)
+        )
+        source.fetch()
+    finally:
+        httpcore_logger.handlers.remove(handler)
+
+    [record] = records
+    assert "super-secret-value" not in record.getMessage()
+    assert "***" in record.getMessage()

@@ -55,6 +55,7 @@ from linceo.core.policy import (
     Thresholds,
     parse_policy_document,
 )
+from linceo.core.remote_policy import PolicySourceStatus, merge_remote_into_local
 from linceo.core.severity import Severity
 from linceo.core.tool_config import (
     LEVEL_1_FIELD_NAMES,
@@ -104,6 +105,7 @@ _FILE_TOP_LEVEL_KNOWN_KEYS = frozenset(
         "skipped_tools",
         "tool_defaults",
         "tools",
+        "remote_policy",
     }
 )
 
@@ -150,12 +152,22 @@ class Config:
     `policy`: none of their shapes (a list of patterns, a local path, an
     arbitrary per-tool table) fit a scalar CLI flag or environment
     variable any better than exclusions and tool skips already didn't.
+    `threshold_resolution` and `tool_defaults`/`tool_configs` may
+    themselves have been governed by a remote policy document rather than
+    this file's own declarations (ADR R2, §8.4) — `policy_source` is
+    `None` for the vast majority of runs (no `[remote_policy]` declared at
+    all) and otherwise names exactly where that remote-governed content
+    came from this run: fetched fresh, a cached fallback, or unavailable
+    (local-only). `policy` (exclusions, tool skips) is never affected by
+    this either way — those two sections are local-only by design (ADR
+    §8.4) and are not part of what a remote source can govern.
 
     Every field defaults to the permissive, reporting-only choice the ADR
     documents: no gate configured (§8.1), `continue_on_tool_error = False`
     (§5), `strict_normalization = False` (§6), the default 90-day exclusion
-    horizon, the default 20-row console table (§7, §8.2), and no
-    integration configured beyond its own built-in defaults (§8.5).
+    horizon, the default 20-row console table (§7, §8.2), no integration
+    configured beyond its own built-in defaults (§8.5), and no remote
+    policy source (§8.4).
     """
 
     threshold_resolution: ThresholdResolution = field(
@@ -168,6 +180,7 @@ class Config:
     policy: Policy = field(default_factory=Policy)
     tool_defaults: ToolConfig = field(default_factory=ToolConfig)
     tool_configs: Mapping[str, ToolConfig] = field(default_factory=dict)
+    policy_source: PolicySourceStatus | None = None
 
 
 def _parse_fail_on(raw: str) -> Severity | None:
@@ -314,6 +327,36 @@ def _validate_version(raw_document: Mapping[str, object], *, path: str) -> None:
             f"{version!r} (supported: {SUPPORTED_CONFIG_VERSION})"
         )
         raise ConfigurationError(msg)
+
+
+def resolve_local_document(
+    *, explicit_config_path: str | None, workspace_path: str, package_root: str
+) -> tuple[str, Mapping[str, object]]:
+    """Resolve and load the *local* policy document alone: its path and decoded content.
+
+    The first few steps `load_config` itself always performed, pulled out
+    on their own (ADR R2, §8.4) so a caller can inspect this document's own
+    `[remote_policy]` declaration (`linceo.core.remote_policy.parse_remote_policy_declaration`)
+    — to know *whether*, and from where, to fetch a remote policy document —
+    before the rest of `load_config`'s resolution (which needs that fetch's
+    outcome already in hand, via its own `remote_document` parameter) runs
+    at all. `load_config` calls this too, so both callers agree on exactly
+    the same file, by construction.
+
+    Raises:
+        ConfigurationError: if every candidate path (ADR §5/R5) resolves
+            inside `package_root`, the file exists but is not valid TOML,
+            or it declares an unsupported schema `version`.
+    """
+    candidates = candidate_config_paths(
+        explicit_config_path=explicit_config_path, workspace_path=workspace_path
+    )
+    _assert_outside_package(candidates, package_root=package_root)
+    file_path = candidates[0]
+
+    raw_document = _load_toml_document(file_path)
+    _validate_version(raw_document, path=file_path)
+    return file_path, raw_document
 
 
 def _validate_top_level_keys(raw_document: Mapping[str, object], *, path: str) -> None:
@@ -468,6 +511,8 @@ def load_config(
     workspace_path: str,
     package_root: str,
     today: date,
+    remote_document: Mapping[str, object] | None = None,
+    policy_source: PolicySourceStatus | None = None,
 ) -> Config:
     """Resolve a `Config` following the ADR §5/R5 precedence chain.
 
@@ -478,6 +523,21 @@ def load_config(
     is supplied by the caller rather than read from the system clock here
     (ADR R3's determinism corollary): it is the reference date every
     exclusion's and tool skip's `expires_at` is validated against.
+
+    `remote_document` and `policy_source` are the outcome of a caller
+    already having resolved this run's `[remote_policy]` declaration, if
+    any (ADR R2, §8.4) — `linceo.cli.scan` does so via
+    `resolve_local_document` (this same local document, resolved once and
+    shared) and `linceo.core.remote_policy.resolve_remote_policy_document`,
+    *before* calling this function, since fetching is not this function's
+    concern (it does no network I/O of its own, like the rest of `core`).
+    When `remote_document` is given, its governed keys
+    (`linceo.core.remote_policy.merge_remote_into_local`) replace the local
+    document's own for `fail_on`/`[thresholds]`/`[tool_defaults]`/`[tools.<name>]`
+    entirely — never `[[exclusions]]`/`[[skipped_tools]]`, which stay
+    local-only by design. `policy_source` is carried straight onto the
+    returned `Config.policy_source`, for a report to declare; both are
+    `None` together for the common case of no `[remote_policy]` at all.
 
     Raises:
         ConfigurationError: if a config file candidate path resolves
@@ -490,14 +550,16 @@ def load_config(
     """
     _validate_cli_overrides(cli_overrides)
 
-    candidates = candidate_config_paths(
-        explicit_config_path=explicit_config_path, workspace_path=workspace_path
+    file_path, local_document = resolve_local_document(
+        explicit_config_path=explicit_config_path,
+        workspace_path=workspace_path,
+        package_root=package_root,
     )
-    _assert_outside_package(candidates, package_root=package_root)
-    file_path = candidates[0]
-
-    raw_document = _load_toml_document(file_path)
-    _validate_version(raw_document, path=file_path)
+    raw_document = (
+        merge_remote_into_local(local_document=local_document, remote_document=remote_document)
+        if remote_document is not None
+        else local_document
+    )
     _validate_top_level_keys(raw_document, path=file_path)
 
     report_max_rows_raw = _extract_report_max_rows(raw_document, path=file_path)
@@ -555,4 +617,5 @@ def load_config(
         policy=Policy(exclusions=policy_document.exclusions, tool_skips=policy_document.tool_skips),
         tool_defaults=tool_defaults,
         tool_configs=tool_configs,
+        policy_source=policy_source,
     )

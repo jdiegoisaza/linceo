@@ -84,6 +84,17 @@ DEFAULT_REPORT_MAX_ROWS = 20
 #: declared does not drift the day that flag exists.
 DEFAULT_MAX_DATA_SOURCE_AGE_DAYS = 7
 
+#: Default staleness threshold for a cached remote policy document's own age
+#: (ADR R2, §8.4, "Fuente remota de la política") — mirrors
+#: `DEFAULT_MAX_DATA_SOURCE_AGE_DAYS`'s role for a Trivy vulnerability
+#: database exactly: past this many days, a cached fallback copy is flagged
+#: `stale` in the report, but is still used (ADR §5's "degradación visible,
+#: nunca error fatal" applies here with no hard cutoff, the same as it
+#: already does for tool data sources). Configurable in a future revision
+#: via `--max-policy-age` (not yet built), the same deliberate deferral
+#: `DEFAULT_MAX_DATA_SOURCE_AGE_DAYS` already documents for `--max-db-age`.
+DEFAULT_MAX_POLICY_CACHE_AGE_DAYS = 7
+
 
 class PolicyConfigurationError(Exception):
     """A policy document, or how it interacts with the current run, is invalid.

@@ -194,6 +194,13 @@ def run(
     a run's evidence is only known to be incomplete once every execution
     has been attempted or sanctioned-skipped.
 
+    `config.policy_source` — whether and how this run's thresholds and tool
+    configuration were governed by a remote policy document (ADR R2, §8.4)
+    — is copied straight onto the returned `RunResult.policy_source`; this
+    function does no remote resolution of its own, since `config` already
+    carries the outcome of that (`linceo.core.config.load_config`'s own
+    `remote_document`/`policy_source` parameters).
+
     Raises:
         UnsupportedToolConfigError: if any non-skipped integration's
             `build_command` rejects its resolved `ToolConfig` (ADR §8.5).
@@ -276,4 +283,5 @@ def run(
         expired_exclusions=exclusion_outcome.expired,
         applied_tool_skips=applied_tool_skips,
         expired_tool_skips=expired_skips,
+        policy_source=config.policy_source,
     )

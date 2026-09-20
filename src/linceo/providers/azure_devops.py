@@ -1,4 +1,4 @@
-"""``azure_devops``: the reference `ContextProvider` proving the port against a second source.
+"""``azure_devops``: the reference `ContextProvider`, and the reference `PolicySource` (ADR §10).
 
 Fills the same `ExecutionContext` as `linceo.providers.local`, but from a
 source with nothing in common: variables the Azure Pipelines agent injects
@@ -34,15 +34,27 @@ thing a design that only ever looked at `local` would get wrong:
   from a sub-directory. `linceo.cli.scan` passes the same `--path` (or its
   default: the current directory) to whichever provider `--platform`
   selects, exactly as it already does for `local`.
+
+`AzureDevOpsPolicySource`, at the bottom of this module, is a second,
+unrelated port's reference implementation (`linceo.core.ports.PolicySource`,
+ADR R2, §8.4) that happens to live here because it resolves its own
+location — organization and project — from exactly the same runner-injected
+environment variables `AzureDevOpsContextProvider` already reads, via the
+same `process_environment` gateway.
 """
 
 from __future__ import annotations
 
+import hashlib
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from linceo.core.context import ContextResolutionError, ExecutionContext, Platform
+from linceo.core.ports import FetchedPolicy
+from linceo.core.remote_policy import RemotePolicyFetchError
+from linceo.core.secret import Secret, SecretRedactingFilter
 from linceo.providers.environment import process_environment
 
 #: Set by the agent for any repository-backed pipeline; required (ADR §10).
@@ -207,3 +219,178 @@ class AzureDevOpsContextProvider:
             build_id=env.get(_ENV_BUILD_ID) or None,
             source_url=env.get(_ENV_REPOSITORY_URI) or None,
         )
+
+
+#: Every Azure Pipelines job sets both of these, on every trigger type —
+#: unlike `_ENV_REPOSITORY`/`_ENV_SOURCE_VERSION` above, neither requires a
+#: repository-backed pipeline. `System.CollectionUri` is the organization's
+#: own base URL (e.g. `https://dev.azure.com/myorg/`); `System.TeamProject`
+#: is the current project's name.
+_ENV_COLLECTION_URI = "SYSTEM_COLLECTIONURI"
+_ENV_TEAM_PROJECT = "SYSTEM_TEAMPROJECT"
+
+#: Azure DevOps REST API version this reference implementation targets
+#: (ADR R2, §8.4) — pinned the same way a tool binary version is (ADR R4):
+#: an explicit, reviewed choice, never "whatever the server defaults to".
+_REST_API_VERSION = "7.1"
+
+
+@dataclass(frozen=True, slots=True)
+class AzureDevOpsPolicySource:
+    """Fetches one remote policy document's raw content from an Azure DevOps Git repository.
+
+    The one reference `PolicySource` (ADR R2, §8.4, "no implementes un
+    cliente git"): a single authenticated HTTP GET against Azure DevOps'
+    own "Get Item" REST endpoint, not a git clone — a repository this
+    provider only ever reads one small file from has no business paying for
+    authentication, history, or submodule handling a full clone would
+    require, and the REST endpoint already returns exactly the raw bytes
+    this needs. Requires the `linceo[remote-config]` extra (`httpx`,
+    imported lazily inside `fetch` itself — never at module import time, so
+    importing this module, or constructing this class, never requires the
+    extra to be installed; only calling `fetch` without it does, and that
+    failure degrades exactly like any other, ADR §5).
+
+    `repository` and `path` are `RemotePolicyDeclaration.repository`/`.path`
+    verbatim — a name, never a URL (ADR §8.4). The organization is resolved
+    from the current build's own environment (`_ENV_COLLECTION_URI`), the
+    same way `AzureDevOpsContextProvider` resolves everything else about
+    this build — "el ContextProvider resuelve la ubicación... dentro de la
+    organización del build". `project` defaults to the same build's own
+    project (`_ENV_TEAM_PROJECT`) when `None`, but is overridable — a
+    security team's baseline repository realistically lives in its own
+    dedicated Azure DevOps project, not necessarily the one being scanned.
+    `token_env` names the environment variable carrying the bearer token
+    (ADR §9: the flag/field names the origin, never the value) — typically
+    `SYSTEM_ACCESSTOKEN`, the pipeline's own OAuth token, available once a
+    pipeline enables "Allow scripts to access the OAuth token"; a classic
+    Personal Access Token also works the same way. `None` when the
+    repository needs no authentication at all.
+
+    The resolved token value is held as a `linceo.core.secret.Secret` from
+    the moment it is read out of the environment until the single point
+    (`fetch`'s own `Authorization` header assignment) where the literal
+    string is actually needed (ADR §9) — closing the window between "read"
+    and "used" during which an unrelated debug statement added later could
+    otherwise print it by accident. `fetch` additionally attaches a
+    `linceo.core.secret.SecretRedactingFilter` to the `httpx`/`httpcore`
+    loggers before every authenticated request, as defense in depth against
+    those libraries' own internal logging (verified, by reading their
+    source, not to include request headers in the version this project
+    pins — but a third-party library's internal logging is not a contract
+    this project controls, so the second layer stays regardless).
+    """
+
+    repository: str
+    path: str
+    project: str | None = None
+    token_env: str | None = None
+
+    def _resolve_organization_and_project(self, env: Mapping[str, str]) -> tuple[str, str]:
+        """Resolve `(organization_url, project)` from `env`.
+
+        The one place both `fetch` and `cache_key` do so, so the two can
+        never disagree about this source's real location.
+
+        Raises:
+            RemotePolicyFetchError: if `_ENV_COLLECTION_URI` is unset, or
+                `project` is neither set on this declaration nor resolvable
+                from `_ENV_TEAM_PROJECT`.
+        """
+        organization_url = env.get(_ENV_COLLECTION_URI)
+        if not organization_url:
+            msg = (
+                f"{_ENV_COLLECTION_URI} is not set — the azure_devops policy source needs it to "
+                "resolve which organization this build's remote policy repository lives in. "
+                "Azure Pipelines sets this for every job; its absence means this process is not "
+                "actually running under an Azure Pipelines agent."
+            )
+            raise RemotePolicyFetchError(msg)
+
+        project = self.project or env.get(_ENV_TEAM_PROJECT)
+        if not project:
+            msg = (
+                f"remote_policy.project was not set and {_ENV_TEAM_PROJECT} is not set either — "
+                "the azure_devops policy source needs one of the two to know which project "
+                f"{self.repository!r} lives in."
+            )
+            raise RemotePolicyFetchError(msg)
+
+        return organization_url, project
+
+    def cache_key(self) -> str:
+        """A hash of organization, project, repository, and path (ADR §8.4, R2, §9).
+
+        Every one of the four is part of this real-world location's own
+        identity — omitting organization (or leaving project only
+        implicit) would let two different tenants of a shared self-hosted
+        agent pool, each naming the same `repository`/`path` in their own
+        `.devsecops/config.toml`, collide on the same cache entry and be
+        served each other's policy document the moment either one's fetch
+        failed. Resolves organization/project via
+        `_resolve_organization_and_project` — the exact same call `fetch`
+        itself makes — so this can never point at a different location than
+        the one `fetch` actually reads from.
+
+        Raises:
+            RemotePolicyFetchError: see `_resolve_organization_and_project`.
+        """
+        organization_url, project = self._resolve_organization_and_project(process_environment())
+        canonical = f"{organization_url.rstrip('/')}/{project}/{self.repository}/{self.path}"
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def fetch(self) -> FetchedPolicy:
+        """Fetch this document's current raw content over HTTPS.
+
+        Raises:
+            RemotePolicyFetchError: if the `linceo[remote-config]` extra is
+                not installed; the build's own organization or project
+                cannot be resolved (see `_resolve_organization_and_project`);
+                or the HTTP request itself fails for any reason (network
+                error, authentication failure, the item not existing at
+                `path`, any non-2xx response).
+        """
+        try:
+            import httpx
+        except ImportError as exc:
+            msg = (
+                "fetching a remote policy document from Azure DevOps requires the "
+                "'linceo[remote-config]' extra (pip install 'linceo[remote-config]')"
+            )
+            raise RemotePolicyFetchError(msg) from exc
+
+        env = process_environment()
+        organization_url, project = self._resolve_organization_and_project(env)
+
+        base = organization_url.rstrip("/")
+        url = f"{base}/{project}/_apis/git/repositories/{self.repository}/items"
+        params = {"path": self.path, "download": "true", "api-version": _REST_API_VERSION}
+        headers: dict[str, str] = {}
+        token = Secret(env[self.token_env]) if self.token_env and env.get(self.token_env) else None
+        if token is not None:
+            _redact_from_http_client_logs(token)
+            headers["Authorization"] = f"Bearer {token.reveal()}"
+
+        try:
+            response = httpx.get(url, params=params, headers=headers, timeout=10.0)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            msg = f"failed to fetch {self.repository}/{self.path} from Azure DevOps: {exc}"
+            raise RemotePolicyFetchError(msg) from exc
+
+        return FetchedPolicy(content=response.text)
+
+
+def _redact_from_http_client_logs(token: Secret) -> None:
+    """Attach a `SecretRedactingFilter` for `token` to the `httpx` and `httpcore` loggers (ADR §9).
+
+    Defense in depth: neither library currently includes request headers in
+    their own DEBUG-level tracing (verified by reading their source), but
+    that is their implementation detail, not a contract this project can
+    rely on across every version `linceo[remote-config]`'s range allows —
+    this filter still redacts `token`'s value from any log record either
+    logger produces, regardless.
+    """
+    filter_ = SecretRedactingFilter(token)
+    logging.getLogger("httpx").addFilter(filter_)
+    logging.getLogger("httpcore").addFilter(filter_)

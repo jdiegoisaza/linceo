@@ -154,6 +154,45 @@ is on `PATH`, at a compatible version, and (for Trivy) how old its
 vulnerability database is; a missing or incompatible tool gets an
 actionable install/upgrade hint printed right there.
 
+### Remote policy (optional, ADR R2, §8.4)
+
+Thresholds and per-tool configuration can be governed centrally instead of
+per-repository — the case where security maintains one policy document and
+every pipeline inherits it. Declare it in the scanned repository's own
+`.devsecops/config.toml` (never in this repository, R5):
+
+```toml
+[remote_policy]
+repository = "security-baseline"   # name only, never a URL
+# path, project, token_env are all optional — see the ADR amendment for defaults
+```
+
+Fetching one requires the `linceo[remote-config]` extra:
+
+```bash
+pip install 'linceo[remote-config]'
+```
+
+Today's one reference source is Azure DevOps
+(`linceo.providers.azure_devops.AzureDevOpsPolicySource`): it resolves the
+organization and project from the same Azure Pipelines variables
+`azure_devops` context resolution already reads
+(`SYSTEM_COLLECTIONURI`/`SYSTEM_TEAMPROJECT`), and authenticates via a
+bearer token read from the environment variable `token_env` names — never a
+value in the file itself (ADR §9). `[[exclusions]]` and `[[skipped_tools]]`
+stay local-only always; a remote document declaring either is a
+configuration error, not a silently-ignored one.
+
+A failed fetch never fails a run: it falls back to the last successfully
+fetched copy (cached under `~/.cache/linceo/remote-policy` by default, or
+`$LINCEO_POLICY_CACHE_DIR`, owner-only permissions, keyed by the source's
+own resolved organization/project/repository/path so two tenants of a
+shared runner never collide), or to the local document alone if there is no
+cache yet — always declared prominently in the report, with the cached
+copy's own age, the same `stale_data` principle §5 already applies to a
+tool's own vulnerability database. The bearer token itself is never logged,
+cached, or otherwise persisted (ADR §9).
+
 ## Development
 
 ```bash

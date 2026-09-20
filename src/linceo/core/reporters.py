@@ -21,6 +21,7 @@ from linceo.core.findings import Category, Finding
 from linceo.core.fingerprint import short_fingerprints
 from linceo.core.gate import find_breaches
 from linceo.core.policy import DEFAULT_REPORT_MAX_ROWS, ConfigLayer, ThresholdResolution
+from linceo.core.remote_policy import PolicySourceState, PolicySourceStatus
 from linceo.core.report_schema import ReportSchema
 from linceo.core.results import RunResult, RunStatus, ThresholdBreach
 from linceo.core.severity import SEVERITY_ORDER, Severity
@@ -215,6 +216,36 @@ def _policy_skip_lines(result: RunResult) -> list[str]:
     return lines
 
 
+def _render_policy_source(status: PolicySourceStatus) -> str:
+    """Render one `PolicySourceStatus` as its own console line (ADR R2, §8.4).
+
+    Mirrors `linceo.cli.doctor._render_data_source`'s "declare the age,
+    never just a flag" shape — ADR §5's `stale_data` principle applied to a
+    remote policy document instead of a tool's vulnerability database.
+    """
+    origin = f"{status.repository}/{status.path}"
+    if status.state is PolicySourceState.FRESH:
+        return f"Remote policy: {origin} — fetched fresh this run"
+    if status.state is PolicySourceState.CACHED:
+        flag = "STALE" if status.stale else "OK"
+        return (
+            f"Remote policy: {origin} — WARN: fetch failed ({status.detail}), using a cached "
+            f"copy from {status.fetched_at.isoformat() if status.fetched_at else '?'} "
+            f"({status.age_days} days old) [{flag}]"
+        )
+    return (
+        f"Remote policy: {origin} — WARN: unreachable and no cached copy ({status.detail}); "
+        "this run's thresholds and tool configuration are the local document alone"
+    )
+
+
+def _policy_source_lines(result: RunResult) -> list[str]:
+    """Declare this run's remote policy provenance, if `[remote_policy]` was configured at all."""
+    if result.policy_source is None:
+        return []
+    return [_render_policy_source(result.policy_source), ""]
+
+
 def _exclusion_summary_lines(result: RunResult) -> list[str]:
     """Suppressed and expired-exclusion counts — printed unconditionally, even when both are zero.
 
@@ -311,6 +342,7 @@ def render_console(
         )
     lines.append("")
 
+    lines.extend(_policy_source_lines(result))
     lines.extend(_policy_skip_lines(result))
     lines.extend(_findings_section(result, schemas=schemas, max_rows=max_rows))
     lines.extend(_exclusion_summary_lines(result))

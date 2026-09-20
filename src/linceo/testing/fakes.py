@@ -1,9 +1,11 @@
-"""`FakeContextProvider` and `FakeToolExecutor`: permanent doubles for the ADR §1 ports.
+"""`FakeContextProvider`, `FakeToolExecutor`, `FakePolicySource`: permanent doubles for the ports.
 
 Distributed as part of the installed package (ADR §11) — not scaffolding
 discarded once real adapters exist. `FakeToolExecutor` replays previously
 recorded output rather than simulating a tool's behavior from scratch, to
 minimize drift between what the fake allows and what a real tool produces.
+`FakePolicySource` exercises `linceo.core.ports.PolicySource` (ADR R2, §8.4)
+the same way `FakeContextProvider` exercises `ContextProvider`.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from linceo.core.context import ExecutionContext
-from linceo.core.ports import ProcessResult
+from linceo.core.ports import FetchedPolicy, ProcessResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,3 +76,39 @@ class FakeToolExecutor:
         if isinstance(recorded, Exception):
             raise recorded
         return recorded
+
+
+@dataclass(slots=True)
+class FakePolicySource:
+    """A `PolicySource` that returns (or raises) fixed, caller-supplied outcomes (ADR R2, §8.4).
+
+    `outcome` is either the `FetchedPolicy` every `fetch()` call returns, or
+    the `Exception` instance every call raises — a test constructs it with
+    `linceo.core.remote_policy.RemotePolicyFetchError` to simulate a failed
+    fetch without needing a real network or HTTP client. `calls` counts how
+    many times `fetch` was invoked, so a test can assert whether
+    `linceo.core.remote_policy.resolve_remote_policy_document` actually
+    attempted one. `cache_key_outcome` is the fixed string `cache_key()`
+    returns (default: an arbitrary but stable value, distinct instances
+    given different values so a test can assert two fakes never collide —
+    ADR §9's cache-collision fix, exercised without a real `PolicySource`),
+    or an `Exception` it raises instead, for a test that simulates a source
+    unable to resolve its own location.
+    """
+
+    outcome: FetchedPolicy | Exception
+    cache_key_outcome: str | Exception = "fake-cache-key"
+    calls: int = field(default=0, init=False)
+
+    def fetch(self) -> FetchedPolicy:
+        """Return (or raise) the fixed outcome this fake was constructed with."""
+        self.calls += 1
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+    def cache_key(self) -> str:
+        """Return (or raise) the fixed `cache_key_outcome` this fake was constructed with."""
+        if isinstance(self.cache_key_outcome, Exception):
+            raise self.cache_key_outcome
+        return self.cache_key_outcome

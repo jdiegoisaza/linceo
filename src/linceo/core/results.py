@@ -16,6 +16,7 @@ from linceo.core.context import ExecutionContext
 from linceo.core.execution import ToolExecution
 from linceo.core.findings import Category, Finding
 from linceo.core.policy import Exclusion, ThresholdResolution, ToolSkip
+from linceo.core.remote_policy import PolicySourceStatus
 from linceo.core.severity import Severity
 
 
@@ -109,6 +110,16 @@ class RunResult:
     `ToolExecution` with `status = SKIPPED_BY_POLICY`); `expired_tool_skips`
     names ones that had lapsed, whose tool ran normally instead.
 
+    `policy_source` is `None` unless this run declared `[remote_policy]`
+    (ADR R2, §8.4) — copied straight from
+    `linceo.core.config.Config.policy_source` by `linceo.core.engine.run`,
+    so a report can declare exactly where the thresholds and tool
+    configuration that governed this run's gate actually came from:
+    fetched fresh this run, a cached fallback (with its own age), or
+    unavailable (local-only) — the same "no report is clean without
+    declaring the age of its evidence" principle ADR §5 already applies to
+    a tool's own data sources.
+
     `severity_map_version` is `severity_map.toml`'s own `map_version` at
     the time this run's `SeverityNormalizer` was built
     (`linceo.core.normalization.SeverityNormalizer.map_version`) — ADR §6:
@@ -128,3 +139,4 @@ class RunResult:
     expired_exclusions: tuple[Exclusion, ...] = ()
     applied_tool_skips: tuple[ToolSkip, ...] = ()
     expired_tool_skips: tuple[ToolSkip, ...] = ()
+    policy_source: PolicySourceStatus | None = None

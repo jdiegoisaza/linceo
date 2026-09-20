@@ -11,6 +11,7 @@ from linceo.core.execution import ExecutionStatus, ToolExecution
 from linceo.core.findings import Category, Finding, Location
 from linceo.core.gate import evaluate_gate
 from linceo.core.policy import ConfigLayer, Exclusion, ThresholdResolution, ToolSkip
+from linceo.core.remote_policy import PolicySourceState, PolicySourceStatus
 from linceo.core.report_schema import Column, ReportSchema, Truncate
 from linceo.core.reporters import render_console, render_json
 from linceo.core.results import RunResult, RunStatus
@@ -444,6 +445,94 @@ def test_expired_tool_skip_is_surfaced_too() -> None:
     report = _render(result)
 
     assert "Expired tool skips, now running again (1)" in report
+
+
+# --- remote policy source (ADR R2, §8.4) ----------------------------------------
+
+
+def test_no_policy_source_line_when_no_remote_policy_was_configured() -> None:
+    result = _result(fail_on=None, findings=())
+
+    report = _render(result)
+
+    assert "Remote policy" not in report
+
+
+def test_fresh_policy_source_is_reported_plainly() -> None:
+    status = PolicySourceStatus(
+        repository="security-baseline",
+        path="policy.toml",
+        state=PolicySourceState.FRESH,
+        fetched_at=datetime(2026, 9, 19, tzinfo=UTC),
+        age_days=0,
+        stale=False,
+    )
+    result = replace(_result(fail_on=None, findings=()), policy_source=status)
+
+    report = _render(result)
+
+    assert "Remote policy: security-baseline/policy.toml — fetched fresh this run" in report
+
+
+def test_cached_policy_source_warns_with_its_age_and_the_failure_reason() -> None:
+    status = PolicySourceStatus(
+        repository="security-baseline",
+        path="policy.toml",
+        state=PolicySourceState.CACHED,
+        fetched_at=datetime(2026, 9, 10, tzinfo=UTC),
+        age_days=9,
+        stale=True,
+        detail="network unreachable",
+    )
+    result = replace(_result(fail_on=None, findings=()), policy_source=status)
+
+    report = _render(result)
+
+    assert "WARN: fetch failed (network unreachable)" in report
+    assert "9 days old" in report
+    assert "[STALE]" in report
+
+
+def test_unavailable_policy_source_warns_that_the_run_used_the_local_document_alone() -> None:
+    status = PolicySourceStatus(
+        repository="security-baseline",
+        path="policy.toml",
+        state=PolicySourceState.UNAVAILABLE,
+        fetched_at=None,
+        age_days=None,
+        stale=True,
+        detail="401 unauthorized",
+    )
+    result = replace(_result(fail_on=None, findings=()), policy_source=status)
+
+    report = _render(result)
+
+    assert "WARN: unreachable and no cached copy (401 unauthorized)" in report
+    assert "local document alone" in report
+
+
+def test_policy_source_status_round_trips_through_json() -> None:
+    status = PolicySourceStatus(
+        repository="security-baseline",
+        path="policy.toml",
+        state=PolicySourceState.FRESH,
+        fetched_at=datetime(2026, 9, 19, tzinfo=UTC),
+        age_days=0,
+        stale=False,
+    )
+    result = replace(_result(fail_on=None, findings=()), policy_source=status)
+
+    decoded = json.loads(render_json(result))
+
+    assert decoded["policy_source"] == {
+        "repository": "security-baseline",
+        "path": "policy.toml",
+        "state": "fresh",
+        "fetched_at": "2026-09-19T00:00:00+00:00",
+        "age_days": 0,
+        "stale": False,
+        "detail": None,
+    }
 
 
 # --- JSON reporter --------------------------------------------------------------

@@ -25,6 +25,7 @@ from linceo.core.fingerprint import secret_fingerprint
 from linceo.core.normalization import SeverityNormalizer
 from linceo.core.policy import ConfigLayer, Exclusion, Policy, ThresholdResolution, ToolSkip
 from linceo.core.ports import ProcessResult, ToolExecutor
+from linceo.core.remote_policy import PolicySourceState, PolicySourceStatus
 from linceo.core.report_schema import Column, ReportSchema
 from linceo.core.results import RunResult, RunStatus
 from linceo.core.severity import Severity
@@ -451,6 +452,34 @@ def test_an_unconfigured_tool_gets_the_all_default_tool_config() -> None:
 
     [(_argv, _env, _cwd, timeout)] = executor.calls
     assert timeout is None
+
+
+def test_policy_source_status_is_copied_onto_the_run_result() -> None:
+    """ADR R2, §8.4: `Config.policy_source` reaches the report unchanged, whether or not set."""
+    gitleaks = StaticToolIntegration(
+        name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+    status = PolicySourceStatus(
+        repository="security-baseline",
+        path="policy.toml",
+        state=PolicySourceState.FRESH,
+        fetched_at=_NOW,
+        age_days=0,
+        stale=False,
+    )
+
+    with_remote = _run(
+        integrations={Category.SECRETS: gitleaks},
+        executor=executor,
+        config=Config(policy_source=status),
+    )
+    without_remote = _run(
+        integrations={Category.SECRETS: gitleaks}, executor=executor, config=Config()
+    )
+
+    assert with_remote.policy_source is status
+    assert without_remote.policy_source is None
 
 
 def test_unsupported_tool_config_aborts_the_run_before_any_tool_executes() -> None:

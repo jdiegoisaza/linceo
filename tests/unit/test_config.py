@@ -12,9 +12,11 @@ from linceo.core.config import (
     ConfigurationError,
     candidate_config_paths,
     load_config,
+    resolve_local_document,
 )
 from linceo.core.findings import Category
 from linceo.core.policy import ConfigLayer
+from linceo.core.remote_policy import PolicySourceState, PolicySourceStatus
 from linceo.core.severity import Severity
 from linceo.core.tool_config import ToolConfig
 
@@ -793,3 +795,117 @@ def test_an_unrelated_unknown_root_field_gets_no_level_1_hint(tmp_path: Path) ->
         )
 
     assert "tool_defaults" not in str(exc_info.value)
+
+
+# --- remote policy resolution (ADR R2, §8.4) ----------------------------------
+
+
+def test_resolve_local_document_returns_the_same_document_load_config_would_use(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('fail_on = "high"\n')
+
+    file_path, document = resolve_local_document(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+    )
+
+    assert file_path.endswith("config.toml")
+    assert document == {"fail_on": "high"}
+
+
+def test_a_remote_policy_table_in_the_local_file_is_not_an_unknown_field(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('[remote_policy]\nrepository = "security-baseline"\n')
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    assert config == Config()
+
+
+def test_remote_document_thresholds_replace_the_local_files_own(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text("[thresholds]\nhigh = 5\n")
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+        remote_document={"thresholds": {"critical": 0}},
+    )
+
+    assert config.threshold_resolution.thresholds == {Severity.CRITICAL: 0}
+    assert config.threshold_resolution.source is ConfigLayer.FILE
+
+
+def test_remote_document_never_touches_local_exclusions(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[[exclusions]]\n"
+        'fingerprint = "v1:abc"\n'
+        'reason = "local team decision"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-11-30\n"
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+        remote_document={"thresholds": {"critical": 0}},
+    )
+
+    [exclusion] = config.policy.exclusions
+    assert exclusion.fingerprint == "v1:abc"
+
+
+def test_a_governed_key_the_remote_document_is_silent_on_falls_back_to_the_local_file(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('[tool_defaults]\nexclude_paths = ["node_modules/"]\n')
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+        remote_document={"thresholds": {"critical": 0}},
+    )
+
+    assert config.tool_defaults == ToolConfig(exclude_paths=("node_modules/",))
+
+
+def test_policy_source_status_is_carried_onto_the_resolved_config(tmp_path: Path) -> None:
+    status = PolicySourceStatus(
+        repository="security-baseline",
+        path="policy.toml",
+        state=PolicySourceState.FRESH,
+        fetched_at=None,
+        age_days=0,
+        stale=False,
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+        policy_source=status,
+    )
+
+    assert config.policy_source is status

@@ -415,9 +415,10 @@ implícito en el orden de los `if`), siempre sobreescribible explícitamente con
 **Decisión:** cero telemetría se implementa por *ausencia de capacidad*, no por un
 interruptor que pueda quedar mal configurado: no existe ningún cliente HTTP en las
 dependencias base del paquete. La configuración remota opcional (mencionada en el
-contexto original del proyecto) vive en un extra instalable aparte
-(`pip install linceo[remote-config]`); si la descarga falla, el comportamiento es
-`WARN` y continuar con la configuración local resuelta — degradación, nunca error
+contexto original del proyecto, implementada en la enmienda de §8.4 "Fuente remota de
+la política") vive en un extra instalable aparte (`pip install linceo[remote-config]`);
+si la descarga falla, el comportamiento es `WARN` y continuar con la configuración
+local resuelta — degradación, nunca error
 fatal. Los binarios de herramienta (Gitleaks, Trivy) **nunca se descargan en runtime**
 bajo ninguna circunstancia: si faltan, es un error accionable (ver R4), no un intento
 de resolución automática.
@@ -1550,6 +1551,257 @@ cambios. El campo `version` en la cabecera del documento existe precisamente par
 futuro: hoy solo `1` es válido, y cualquier otro valor es error de configuración
 explícito — la plomería de una fuente remota es trabajo posterior deliberadamente
 aplazado (§14); el esquema difícil de acertar es este.
+
+#### Enmienda (2026-09-19): fuente remota de la política, implementada (R2)
+
+La plomería aplazada arriba ya existe: `linceo.core.remote_policy`,
+`linceo.providers.azure_devops.AzureDevOpsPolicySource`, y un nuevo extra
+opcional `linceo[remote-config]`. Cubre el caso real que motivó el diseño
+original: seguridad mantiene el documento de política en un repositorio
+propio, y cada pipeline que escanea un repositorio distinto lo hereda sin
+copiar nada.
+
+**Separación por gobierno, no por mecanismo de archivo.** El documento remoto
+declara únicamente lo que seguridad decide centralmente y cambia pocas veces
+al año — `fail_on`, `[thresholds]`/`[thresholds.<categoría>]`, y
+`[tool_defaults]`/`[tools.<nombre>]` —; nunca `[[exclusions]]` ni
+`[[skipped_tools]]`, que cada equipo declara en su propio
+`.devsecops/config.toml` y cambia cada semana. Si el documento remoto declara
+cualquiera de estas dos últimas secciones, es **error de configuración**, no
+un aviso silenciosamente ignorado: un documento remoto que las declarara sería
+un error de quien lo escribió (seguridad, gobernando algo que no le
+corresponde gobernar centralmente), y este proyecto ya trata sistemáticamente
+cualquier campo mal ubicado como error explícito con mensaje específico (el
+precedente exacto es el aviso de `[tool_defaults]`/`[tools.<nombre>]` que
+`_validate_top_level_keys` ya daba para `exclude_paths` en la raíz del
+documento, §8.5 abajo) — nunca como una degradación silenciosa que dejaría a
+todo pipeline consumidor con una supresión que ningún equipo local pidió. La
+misma regla rechaza cualquier otra clave fuera de ese conjunto gobernado
+(`linceo.core.remote_policy.validate_remote_document`), así el documento
+remoto nunca se convierte, sin que nadie lo decida explícitamente, en el
+lugar donde también viven `continue_on_tool_error` o el horizonte de
+caducidad.
+
+Las claves gobernadas que el documento remoto sí declara **reemplazan
+enteramente** la declaración del archivo local para esa clave — nunca se
+mezclan campo a campo, el mismo principio de "reemplaza, nunca mezcla" que ya
+regía `[thresholds.<categoría>]` sobre `[thresholds]` y un `--fail-on` de CLI
+sobre el archivo. Una clave gobernada que el documento remoto no menciona en
+absoluto conserva el valor del archivo local, si lo hay — el mismo principio
+de "una capa que no menciona un campo nunca oculta el valor de una capa
+inferior" que ya gobierna la cadena CLI/entorno/archivo (`merge_remote_into_local`).
+
+**Referencia por nombre, nunca por URL.** El repositorio escaneado declara,
+en su propio `.devsecops/config.toml` (nunca en este repositorio, R5), una
+nueva sección `[remote_policy]`:
+
+```toml
+[remote_policy]
+repository = "security-baseline"     # nombre del repositorio de política
+path = "policy.toml"                 # opcional; default: "policy.toml"
+project = "platform-security"        # opcional; default: el proyecto del propio build
+token_env = "SYSTEM_ACCESSTOKEN"     # opcional; nombre de la variable con el token (§9)
+```
+
+Ninguno de estos cuatro campos es un secreto ni una URL — son nombres, y por
+eso viven en el archivo versionado del repositorio como cualquier otro dato
+no sensible de configuración (R5), exactamente igual que `[tool_defaults]`.
+`repository` es obligatorio; los demás son opcionales. Quien resuelve el
+nombre a una ubicación real es el proveedor de plataforma —
+`AzureDevOpsPolicySource`, dentro de `providers/` (el único paquete que lee
+`os.environ`) — leyendo `SYSTEM_COLLECTIONURI` y `SYSTEM_TEAMPROJECT`, las
+mismas variables que Azure Pipelines inyecta en **todo** job, incluso uno sin
+repositorio propio, a diferencia de `BUILD_REPOSITORY_NAME` (§10). `project`
+sólo hace falta declararlo cuando el repositorio de política vive en un
+proyecto de Azure DevOps distinto del que se está escaneando — el caso
+realista de un proyecto dedicado a seguridad/plataforma; por defecto se
+asume el mismo proyecto del build.
+
+**No se implementa un cliente git.** Azure DevOps sirve el contenido crudo de
+un archivo por HTTP (`GET .../_apis/git/repositories/{repo}/items?path=...&download=true`)
+con el token en la cabecera `Authorization`. Frente a clonar el repositorio
+completo, esta petición no necesita resolver el historial, no necesita
+manejar submódulos, y no necesita ninguna credencial más allá de la que ya
+autentica peticiones REST — su superficie de fallo y de código es
+comparable a la de cualquier otra llamada HTTP de este proyecto, no a la de
+un cliente git embebido. Clonar además traería consigo exactamente el tipo
+de dependencia pesada que R2 existe para evitar en el paquete base.
+
+**Autenticación por variable de entorno, coherente con §9.** El campo
+`token_env` nombra la variable — nunca el valor — y `AzureDevOpsPolicySource`
+la lee sólo dentro de `providers/`, enviándola como
+`Authorization: Bearer <token>`, nunca como parte de una URL o de un
+argumento de línea de comandos. El caso frecuente en Azure DevOps es
+`SYSTEM_ACCESSTOKEN`, el token OAuth del propio pipeline, disponible una vez
+habilitado "Allow scripts to access the OAuth token"; un Personal Access
+Token clásico funciona igual. Sin `token_env`, no se envía cabecera de
+autenticación — el caso de un repositorio de política legible
+anónimamente. El valor leído se mantiene envuelto en `linceo.core.secret.Secret`
+(§9, implementado por primera vez en esta revisión — ver la enmienda de
+endurecimiento más abajo) desde que sale del entorno hasta el único punto
+donde se necesita en texto plano, y `fetch` instala además un filtro de
+redacción sobre los loggers de `httpx`/`httpcore` como segunda capa.
+
+**Degradación visible, nunca error fatal — el mismo principio que
+`stale_data` de §5.** Cada intento de descarga produce un
+`PolicySourceStatus` con tres estados posibles, siempre declarado en el
+reporte (consola y JSON), nunca sólo en un log:
+
+- `fresh` — la descarga de este run tuvo éxito; se usa su contenido y se
+  sobrescribe la caché local.
+- `cached` — la descarga falló (red, autenticación, un documento remoto que
+  no pasa TOML o el límite de gobierno) y se usó la última copia buena
+  conocida en caché, con su antigüedad declarada (`age_days`) y marcada
+  `stale` una vez supera `DEFAULT_MAX_POLICY_CACHE_AGE_DAYS` (7 días,
+  idéntico al umbral que §5 ya usa para la base de datos de Trivy) — sin
+  umbral duro que la invalide, el mismo criterio de §5: una copia vieja se
+  sigue usando, sólo se declara más alto que una fresca.
+- `unavailable` — la descarga falló y no había ninguna copia en caché; el
+  run continúa únicamente con lo que el archivo local declare (sin gate
+  gobernado remotamente, nunca un fallo del proceso). Es exactamente el
+  mismo tratamiento que ya recibía la ausencia total de archivo local antes
+  de esta revisión (`{}`, defaults permisivos) — nunca un error de
+  configuración.
+
+Un documento remoto que sí se descarga pero no pasa la validación de
+gobierno (por ejemplo, declara `[[exclusions]]`) se trata exactamente igual
+que una descarga fallida por red: degrada a caché o a `unavailable`, nunca
+detiene el run — un typo de seguridad en su propio repositorio no puede
+convertirse en un fallo duro para cada pipeline que lo hereda.
+
+**Caché local.** Vive bajo `${LINCEO_POLICY_CACHE_DIR:-${XDG_CACHE_HOME:-~/.cache}/linceo/remote-policy}`,
+un archivo por ubicación real — no por declaración: la clave es
+`PolicySource.cache_key()` (organización, proyecto, repositorio y ruta,
+hasheados juntos por `AzureDevOpsPolicySource`, resolviendo organización y
+proyecto exactamente como `fetch` para que ambos nunca puedan discrepar),
+nunca algo derivado solo de `RemotePolicyDeclaration` — ver la enmienda de
+endurecimiento más abajo para el porqué. El directorio y el archivo se
+crean con permisos exclusivos del propietario (`0700`/`0600`, fijados al
+crearlos, nunca aflojados). **No hay caducidad que bloquee el
+intento de descarga**: cada run con `[remote_policy]` declarado intenta
+refrescar siempre, sin ninguna ventana de reutilización que retrase cuándo
+un cambio de política llega a un pipeline — es precisamente lo que "todos
+los pipelines la heredan" exige: propagación en el siguiente run, no en el
+siguiente día. La caché existe únicamente como respaldo para cuando esa
+descarga falla, con su propia antigüedad declarada como se describe arriba.
+**No existe un mecanismo para "forzar un refresco"** porque no hace falta
+uno: la descarga ya se intenta siempre; lo único que un operador podría
+forzar es el uso de la caché en sí, que se soluciona borrando el archivo
+(o el directorio completo) — no se ha añadido ningún flag para eso, por ser
+una operación de archivo trivial y de uso excepcional, en línea con
+"no construyas lo que no se necesita todavía" (`--max-policy-age`
+configurable, análogo al `--max-db-age` de §5, queda igual de aplazado).
+
+**Qué pasa cuando no hay ni remota ni local.** Sin `[remote_policy]`
+declarado, el comportamiento es exactamente el de antes de esta revisión —
+sin cambios. Con `[remote_policy]` declarado pero la descarga fallando y sin
+caché (primera vez que este runner intenta este repositorio de política, por
+ejemplo), y el archivo local sin sus propias tablas de umbral o
+configuración de herramienta: el run continúa sin gate configurado, con
+`stale_data`-como-`unavailable` declarado prominentemente — el mismo
+tratamiento permisivo, nunca un error, que un `.devsecops/config.toml`
+enteramente ausente ya recibía.
+
+**El extra opcional.** `pip install linceo[remote-config]` instala `httpx`
+— el paquete base sigue sin ganar ninguna dependencia de red (R2): importar
+`linceo.providers.azure_devops` o construir `AzureDevOpsPolicySource` nunca
+requiere el extra; sólo `fetch()` lo necesita, y su ausencia se traduce en
+el mismo `RemotePolicyFetchError` accionable que cualquier otro fallo de
+descarga, degradando exactamente igual.
+
+**Verificación:** `tests/unit/test_remote_policy.py` cubre el límite de
+gobierno (documentos remotos con `exclusions`/`skipped_tools`/claves no
+gobernadas rechazados; claves gobernadas fusionadas campo a campo, nunca
+mezcladas), la caché (lectura, escritura, corrupción tratada como ausencia,
+antigüedad, bandera `stale`, aislamiento entre ubicaciones distintas y
+permisos) y las cuatro rutas de degradación
+(`fresh`/`cached`/`unavailable`/documento inválido). `tests/unit/test_azure_devops_policy_source.py`
+cubre la resolución de ubicación (organización y proyecto desde el entorno,
+`project` explícito ganando sobre el del build), `cache_key` (determinista,
+distinto por organización y por proyecto, de acuerdo con `fetch` sobre cuál
+proyecto gana), la cabecera de autenticación (el token nunca aparece en la
+URL ni en los parámetros capturados), la redacción de un log hipotético que
+sí incluyera cabeceras, y el extra ausente. `tests/unit/test_secret.py`
+cubre `Secret` contra cada vía de exposición accidental que §9 nombra, y
+`SecretRedactingFilter` de forma aislada. `tests/unit/test_cli_scan.py`
+añade dos escenarios de extremo a extremo: un documento remoto gobernando
+el gate, y una descarga fallida sin caché degradando con advertencia
+visible sin romper el exit code.
+
+#### Enmienda (2026-09-19, revisión de seguridad): clave de caché por ubicación real, y `Secret` puesto en práctica
+
+Dos defectos encontrados en revisión antes de fusionar lo anterior, ambos
+corregidos aquí:
+
+**1. La clave de caché no incluía la organización, y el proyecto solo
+entraba cuando se declaraba explícitamente.** La primera versión derivaba
+la clave únicamente de `RemotePolicyDeclaration` (`repository`/`project`/`path`,
+con `project` vacío cuando no se declaraba). Dos equipos distintos en un
+mismo agente compartido — el caso real que motiva "runner compartido" —
+pueden perfectamente declarar el mismo `[remote_policy]` (`repository =
+"security-baseline"`, sin `project` explícito, que es el caso común): sus
+declaraciones son idénticas, así que la clave derivada también lo era, y el
+primero en descargar con éxito dejaba su copia donde el segundo la leería
+como propia en cuanto su propia descarga fallara — exactamente "un agente
+que sirve a dos equipos les daría la política del otro".
+
+**Corrección:** la clave de caché ya no se deriva de la declaración. Se
+añadió `cache_key()` al puerto `PolicySource`
+(`linceo.core.ports.PolicySource.cache_key`) — cada fuente concreta resuelve
+su propia identidad real. `AzureDevOpsPolicySource.cache_key` hashea
+organización + proyecto + repositorio + ruta, resolviendo organización y
+proyecto con la misma función que usa `fetch` (`_resolve_organization_and_project`),
+de modo que ambas nunca pueden apuntar a ubicaciones distintas. Una fuente
+que no puede resolver su propia ubicación (por ejemplo, `SYSTEM_COLLECTIONURI`
+ausente) tampoco tiene una clave de caché segura: se trata como "sin caché
+en absoluto", nunca como una clave adivinada con menos información de la
+que la fuente realmente tiene.
+
+Complemento: `write_cached_policy` ahora crea el archivo y su directorio
+exclusivos del propietario (`0600`/`0700`), fijado en la propia llamada de
+creación — nunca por un `chmod` posterior, que dejaría una ventana breve
+con el permiso por defecto del sistema (típicamente legible por cualquier
+otro usuario u proceso local). Un documento de política no es en sí mismo
+una credencial, pero sigue siendo el dato de un equipo que ningún otro
+inquilino de un runner compartido debería poder leer.
+
+**2. El tipo `Secret` de §9 existía solo como diseño, nunca como código —
+esta es la primera vez que un secreto real fluye por este proyecto en
+tiempo de ejecución.** (`ToolExecutor.run` recibe `env={}` siempre hoy:
+ningún adaptador de herramienta pasa credenciales todavía.) El token leído
+de `token_env` viajaba como `str` normal desde `env.get(...)` hasta la
+cabecera `Authorization`. Nada en el código lo registraba ni lo imprimía,
+pero esa garantía dependía de que siguiera siendo así — exactamente lo que
+§9 dice que la regla no debe depender.
+
+**Corrección:** `linceo.core.secret.Secret` (nuevo módulo, sin dependencias
+de terceros, dentro de `core/`) — `__str__`/`__repr__`/`__format__` devuelven
+siempre `"***"`, y `.reveal()` es el único punto que da el valor real.
+`AzureDevOpsPolicySource.fetch` envuelve el token en `Secret` en cuanto lo
+lee del entorno y llama a `.reveal()` exactamente una vez, al construir la
+cabecera — cerrando la ventana entre "leído" y "usado" en la que una línea
+de depuración añadida después podría imprimirlo por accidente.
+
+Verificado por lectura del código de `httpx`/`httpcore` (versión que este
+proyecto fija): ni `Request.__repr__`/`__str__`, ni los mensajes de
+`httpx.HTTPError` y sus subclases, ni el trazado interno a nivel `DEBUG` de
+`httpcore` incluyen las cabeceras de la petición (solo método, URL, y las
+cabeceras de la *respuesta* del servidor) — confirmado con un script contra
+la versión instalada, no asumido de memoria. Aun así, ese es un detalle de
+implementación de una librería de terceros, no un contrato que este
+proyecto controle ni que se sostenga necesariamente en todo el rango
+`>=0.27,<1.0` que el extra permite. Por eso se añadió igualmente la segunda
+capa que §9 ya diseñaba: `linceo.core.secret.SecretRedactingFilter`, un
+`logging.Filter` que redacta cualquier valor de secreto registrado que
+aparezca en un mensaje de log — `fetch` lo adjunta a los loggers `httpx` y
+`httpcore` antes de cada petición autenticada. `tests/unit/test_azure_devops_policy_source.py::test_fetch_installs_a_redaction_filter_that_catches_a_hypothetical_header_log`
+simula el escenario que hoy no ocurre y confirma que, si ocurriera, la
+segunda capa lo detendría igual.
+
+La caché nunca corrió riesgo por esta vía: lo que se escribe en ella es el
+contenido de la *respuesta* (el documento de política), nunca la petición —
+el token no tiene ningún camino hacia el archivo cacheado, con o sin
+`Secret`.
 
 ### §8.5. Configuración por integración: dos niveles
 
