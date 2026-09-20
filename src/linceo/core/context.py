@@ -18,10 +18,16 @@ class Platform(StrEnum):
     `LOCAL` and `AZURE_DEVOPS` are the v0.1 reference platforms (ADR §10);
     `LOCAL` is mandatory in any scope of the project, since the tool must
     run on a developer's laptop with no pipeline involved at all.
+    `GITHUB_ACTIONS` was added afterward, once the `ContextProvider`
+    contract had already been proven against two implementations of
+    maximum mutual distance — exactly the trigger ADR §1's deferred-work
+    table names for adding a further platform (adapter work, not design
+    work) — see `linceo.providers.github_actions`.
     """
 
     LOCAL = "local"
     AZURE_DEVOPS = "azure_devops"
+    GITHUB_ACTIONS = "github_actions"
 
 
 class ContextResolutionError(Exception):

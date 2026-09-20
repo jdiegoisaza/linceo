@@ -10,29 +10,46 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from linceo.cli.context import _AZURE_DEVOPS_VAR_DESCRIPTIONS
+from linceo.cli.context import (
+    _AZURE_DEVOPS_POLICY_ENV_VARS,
+    _AZURE_DEVOPS_VAR_DESCRIPTIONS,
+    _GITHUB_ACTIONS_VAR_DESCRIPTIONS,
+)
 from linceo.cli.main import app
 from linceo.core.exit_codes import EXIT_CONFIGURATION_ERROR, EXIT_OK
 from linceo.providers.azure_devops import ENV_VARS as AZURE_DEVOPS_ENV_VARS
-from linceo.providers.detection import AZURE_DEVOPS_SENTINEL_ENV_VAR
+from linceo.providers.detection import (
+    AZURE_DEVOPS_SENTINEL_ENV_VAR,
+    GITHUB_ACTIONS_SENTINEL_ENV_VAR,
+)
+from linceo.providers.github_actions import ENV_VARS as GITHUB_ACTIONS_ENV_VARS
 
 runner = CliRunner()
 
 #: Mirrors `tests/unit/test_azure_devops_provider.py`'s `_ALL_KNOWN_VARS`: every
-#: variable any scenario below might set, cleared up front so this suite never passes
-#: (or fails) by accident because the host actually running it happens to carry one.
-_ALL_KNOWN_VARS = (AZURE_DEVOPS_SENTINEL_ENV_VAR, *AZURE_DEVOPS_ENV_VARS)
+#: Azure Pipelines variable any scenario below might set, cleared up front so this
+#: suite never passes (or fails) by accident because the host actually running it
+#: happens to carry one.
+_ALL_KNOWN_AZURE_DEVOPS_VARS = (
+    AZURE_DEVOPS_SENTINEL_ENV_VAR,
+    *AZURE_DEVOPS_ENV_VARS,
+    *_AZURE_DEVOPS_POLICY_ENV_VARS,
+)
+#: Mirrors `tests/unit/test_github_actions_provider.py`'s `_ALL_KNOWN_VARS`, for GitHub Actions.
+_ALL_KNOWN_GITHUB_ACTIONS_VARS = (GITHUB_ACTIONS_SENTINEL_ENV_VAR, *GITHUB_ACTIONS_ENV_VARS)
+_ALL_KNOWN_VARS = (*_ALL_KNOWN_AZURE_DEVOPS_VARS, *_ALL_KNOWN_GITHUB_ACTIONS_VARS)
 
 
 @pytest.fixture(autouse=True)
-def _clean_azure_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_ci_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in _ALL_KNOWN_VARS:
         monkeypatch.delenv(var, raising=False)
 
 
 def test_var_descriptions_stay_in_sync_with_the_canonical_provider_lists() -> None:
     """A variable added to `detection`/`azure_devops` can't silently go undescribed here."""
-    assert set(_AZURE_DEVOPS_VAR_DESCRIPTIONS) == set(_ALL_KNOWN_VARS)
+    assert set(_AZURE_DEVOPS_VAR_DESCRIPTIONS) == set(_ALL_KNOWN_AZURE_DEVOPS_VARS)
+    assert set(_GITHUB_ACTIONS_VAR_DESCRIPTIONS) == set(_ALL_KNOWN_GITHUB_ACTIONS_VARS)
 
 
 def test_azure_pipelines_template_forwards_every_variable_this_project_reads() -> None:
@@ -49,7 +66,7 @@ def test_azure_pipelines_template_forwards_every_variable_this_project_reads() -
     )
     script = template_path.read_text(encoding="utf-8")
 
-    missing = [var for var in _ALL_KNOWN_VARS if f"-e {var}" not in script]
+    missing = [var for var in _ALL_KNOWN_AZURE_DEVOPS_VARS if f"-e {var}" not in script]
     assert not missing, (
         f"{missing} not forwarded with `-e` in azure-pipelines/templates/linceo-scan.yml — "
         "a container invocation using this template would silently lose them, exactly the "
@@ -97,6 +114,35 @@ def test_forced_azure_devops_with_nothing_set_fails_with_an_actionable_message(
     assert result.exit_code == EXIT_CONFIGURATION_ERROR
     assert "Resolved ExecutionContext: FAILED" in result.output
     assert "BUILD_REPOSITORY_NAME is not set" in result.output
+
+
+def test_github_actions_variables_present_are_detected_and_resolved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "acme/widgets")
+    monkeypatch.setenv("GITHUB_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_RUN_ID", "4242")
+
+    result = runner.invoke(app, ["context", "--path", str(tmp_path)])
+
+    assert result.exit_code == EXIT_OK
+    assert "Platform: github_actions (auto-detected)" in result.output
+    assert "repository: acme/widgets" in result.output
+    assert "build_id: 4242" in result.output
+    assert "was not passed into this one" not in result.output
+
+
+def test_forced_github_actions_with_nothing_set_fails_with_an_actionable_message(
+    tmp_path: Path,
+) -> None:
+    result = runner.invoke(
+        app, ["context", "--platform", "github_actions", "--path", str(tmp_path)]
+    )
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "Resolved ExecutionContext: FAILED" in result.output
+    assert "GITHUB_REPOSITORY is not set" in result.output
 
 
 def test_context_is_listed_in_the_root_help() -> None:

@@ -24,18 +24,34 @@ from linceo.core.context import Platform
 #: cannot double as a reliable platform sentinel.
 AZURE_DEVOPS_SENTINEL_ENV_VAR = "TF_BUILD"
 
+#: The sentinel GitHub Actions sets to the literal string `"true"` (lower
+#: case — unlike Azure Pipelines' `"True"`) on every workflow run,
+#: regardless of trigger. GitHub's own documented way to ask "am I running
+#: inside GitHub Actions at all" — the same role `AZURE_DEVOPS_SENTINEL_ENV_VAR`
+#: plays for Azure Pipelines, and preferred over any of the more specific
+#: `GITHUB_*` variables `linceo.providers.github_actions` reads afterwards
+#: for the same reason: several of those are conditional on the trigger
+#: type and so cannot double as a reliable platform sentinel.
+GITHUB_ACTIONS_SENTINEL_ENV_VAR = "GITHUB_ACTIONS"
+
 
 def detect_platform(env: Mapping[str, str]) -> Platform:
     """Detect which `Platform` a run is executing under, from `env` alone.
 
     Declared, deterministic order (ADR §4 R1, §8): Azure Pipelines is
-    checked first, via its `TF_BUILD` sentinel; `local` is the fallback
-    when nothing more specific matches — it is the only platform every
-    scope of this project must support (ADR §10), so it is the correct
-    default for a process that turns out not to be running under any known
-    CI runner at all. Always overridable by an explicit `--platform`,
-    which never calls this function in the first place.
+    checked first, via its `TF_BUILD` sentinel, then GitHub Actions, via
+    its `GITHUB_ACTIONS` sentinel — the two are mutually exclusive in
+    practice (a runner sets at most one), so their relative order carries
+    no real consequence, but R1 requires one fixed, declared order
+    regardless. `local` is the fallback when nothing more specific
+    matches — it is the only platform every scope of this project must
+    support (ADR §10), so it is the correct default for a process that
+    turns out not to be running under any known CI runner at all. Always
+    overridable by an explicit `--platform`, which never calls this
+    function in the first place.
     """
     if env.get(AZURE_DEVOPS_SENTINEL_ENV_VAR) == "True":
         return Platform.AZURE_DEVOPS
+    if env.get(GITHUB_ACTIONS_SENTINEL_ENV_VAR) == "true":
+        return Platform.GITHUB_ACTIONS
     return Platform.LOCAL

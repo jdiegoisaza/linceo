@@ -13,10 +13,10 @@ of it, not a replacement.
 ## Status
 
 Pre-release (`0.1.0.dev0`). The engine, both v0.1 reference tool
-integrations (Gitleaks, Trivy), both reference context providers (`local`,
-`azure_devops`), console/JSON/SARIF reporting, the `doctor` command, and
-the reference container image are in place. See the ADR's build order for
-what ships next.
+integrations (Gitleaks, Trivy), the reference context providers (`local`,
+`azure_devops`, `github_actions`), console/JSON/SARIF reporting, the
+`doctor` command, and the reference container image are in place. See the
+ADR's build order for what ships next.
 
 ## Non-negotiable constraints
 
@@ -145,6 +145,36 @@ its `auto` detection, ADR §4 R1):
   context` shows exactly which platform got selected, why, and the value
   (or absence) of every variable above — run it before a real scan if
   `auto` seems to be picking the wrong platform.
+- **`github_actions`** needs the runner's own default variables forwarded
+  explicitly — every one this project reads (canonical list:
+  `src/linceo/providers/github_actions.py`, `ENV_VARS`, plus the
+  `auto`-detection sentinel below):
+
+  | Variable | Required? | Resolves |
+  |---|---|---|
+  | `GITHUB_ACTIONS` | — | `auto` detection's own sentinel (`linceo.providers.detection`) |
+  | `GITHUB_REPOSITORY` | required | `repository` |
+  | `GITHUB_SHA` | required | `commit` — the ephemeral merge commit GitHub Actions creates on a `pull_request` trigger, used as-is (see the module's docstring for why) |
+  | `GITHUB_REF` | optional | `branch`/tag (non-PR trigger) |
+  | `GITHUB_HEAD_REF` | optional | `branch` (PR trigger) |
+  | `GITHUB_RUN_ID` | optional | `build_id` |
+  | `GITHUB_SERVER_URL` | optional | `source_url` (combined with `GITHUB_REPOSITORY`) |
+
+  ```bash
+  docker run --rm \
+    -e GITHUB_ACTIONS -e GITHUB_REPOSITORY -e GITHUB_SHA -e GITHUB_REF \
+    -e GITHUB_HEAD_REF -e GITHUB_RUN_ID -e GITHUB_SERVER_URL \
+    -v "$PWD:/workspace" ghcr.io/jdiegoisaza/linceo scan secrets
+  ```
+
+  These are GitHub Actions' own default environment variables — every job
+  already has them, with nothing to configure, unlike Azure Pipelines'
+  agent-specific predefined variables above; the snippet only matters when
+  invoking the image directly inside a container-based step.
+
+  **Diagnosing this from inside a container**: `docker run --rm -e
+  GITHUB_ACTIONS -e GITHUB_REPOSITORY ... ghcr.io/jdiegoisaza/linceo
+  context` shows the same breakdown as for `azure_devops` above.
 
 ### `pip install` (local development, bring-your-own tool binaries)
 

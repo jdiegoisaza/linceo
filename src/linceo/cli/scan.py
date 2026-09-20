@@ -51,6 +51,7 @@ from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError, reso
 from linceo.providers.azure_devops import AzureDevOpsContextProvider, AzureDevOpsPolicySource
 from linceo.providers.detection import detect_platform
 from linceo.providers.environment import process_environment
+from linceo.providers.github_actions import GitHubActionsContextProvider
 from linceo.providers.local import LocalContextProvider
 
 scan_app = typer.Typer(help="Run a scan category against a workspace and produce one verdict.")
@@ -93,6 +94,7 @@ class PlatformOption(StrEnum):
     AUTO = "auto"
     LOCAL = "local"
     AZURE_DEVOPS = "azure_devops"
+    GITHUB_ACTIONS = "github_actions"
 
 
 def resolve_context_provider(
@@ -107,8 +109,9 @@ def resolve_context_provider(
     detection entirely) into a constructed provider. Every provider gets
     the same `workspace_path` regardless of which one is chosen — see
     `linceo.providers.azure_devops`'s module docstring for why
-    `azure_devops` needs it passed in exactly like `local` does, rather
-    than reading the runner's own checkout root from its environment.
+    `azure_devops` (and, for the same reason, `github_actions`) needs it
+    passed in exactly like `local` does, rather than reading the runner's
+    own checkout root from its environment.
 
     Public (not underscore-prefixed) because `linceo.cli.context` shares
     it too — platform resolution has exactly one implementation, not one
@@ -117,6 +120,8 @@ def resolve_context_provider(
     resolved = detect_platform(env) if platform is PlatformOption.AUTO else Platform(platform.value)
     if resolved is Platform.AZURE_DEVOPS:
         return AzureDevOpsContextProvider(workspace_path=workspace_path)
+    if resolved is Platform.GITHUB_ACTIONS:
+        return GitHubActionsContextProvider(workspace_path=workspace_path)
     return LocalContextProvider(workspace_path=workspace_path)
 
 
@@ -354,8 +359,8 @@ def scan_secrets(
         "--platform",
         help=(
             "CI platform to resolve ExecutionContext from. `auto` detects Azure Pipelines via "
-            "its TF_BUILD sentinel and falls back to `local` otherwise (ADR §4 R1, §8) — always "
-            "overridable explicitly."
+            "its TF_BUILD sentinel, GitHub Actions via its GITHUB_ACTIONS sentinel, and falls "
+            "back to `local` otherwise (ADR §4 R1, §8) — always overridable explicitly."
         ),
     ),
     fail_on: FailOnOption | None = typer.Option(
@@ -440,8 +445,8 @@ def scan_sca(
         "--platform",
         help=(
             "CI platform to resolve ExecutionContext from. `auto` detects Azure Pipelines via "
-            "its TF_BUILD sentinel and falls back to `local` otherwise (ADR §4 R1, §8) — always "
-            "overridable explicitly."
+            "its TF_BUILD sentinel, GitHub Actions via its GITHUB_ACTIONS sentinel, and falls "
+            "back to `local` otherwise (ADR §4 R1, §8) — always overridable explicitly."
         ),
     ),
     fail_on: FailOnOption | None = typer.Option(

@@ -25,17 +25,39 @@ import typer
 from linceo.cli.scan import PlatformOption, resolve_context_provider
 from linceo.core.context import ContextResolutionError, ExecutionContext, Platform
 from linceo.core.exit_codes import EXIT_CONFIGURATION_ERROR, EXIT_OK
+from linceo.core.remote_policy import DEFAULT_TOKEN_ENV_VAR
 from linceo.providers.azure_devops import ENV_VARS as AZURE_DEVOPS_ENV_VARS
+from linceo.providers.azure_devops import (
+    REMOTE_POLICY_ENV_VARS as AZURE_DEVOPS_REMOTE_POLICY_ENV_VARS,
+)
 from linceo.providers.azure_devops import AzureDevOpsContextProvider
-from linceo.providers.detection import AZURE_DEVOPS_SENTINEL_ENV_VAR
+from linceo.providers.detection import (
+    AZURE_DEVOPS_SENTINEL_ENV_VAR,
+    GITHUB_ACTIONS_SENTINEL_ENV_VAR,
+)
 from linceo.providers.environment import process_environment
+from linceo.providers.github_actions import ENV_VARS as GITHUB_ACTIONS_ENV_VARS
+from linceo.providers.github_actions import GitHubActionsContextProvider
+
+#: `AzureDevOpsPolicySource`'s own env vars (`REMOTE_POLICY_ENV_VARS`) minus
+#: the bearer token — a secret this diagnostic command must never print a
+#: value for (ADR §9), unlike everything else in either table below, none
+#: of which is sensitive. `SYSTEM_COLLECTIONURI`/`SYSTEM_TEAMPROJECT` are
+#: shown here even though `AzureDevOpsContextProvider.resolve()` never
+#: reads them itself — only `AzureDevOpsPolicySource` does — because a
+#: `[remote_policy]` failure is exactly the kind of thing `linceo context`
+#: exists to make diagnosable without running a full scan.
+_AZURE_DEVOPS_POLICY_ENV_VARS = tuple(
+    var for var in AZURE_DEVOPS_REMOTE_POLICY_ENV_VARS if var != DEFAULT_TOKEN_ENV_VAR
+)
 
 #: One short, human-facing description per variable in the table below —
 #: display only, the actual behavior is `linceo.providers.detection`
 #: (the sentinel) and `linceo.providers.azure_devops` (everything else).
 #: `tests/unit/test_cli_context.py` asserts this stays exactly in sync
-#: with `AZURE_DEVOPS_SENTINEL_ENV_VAR` and `AZURE_DEVOPS_ENV_VARS`, so a
-#: variable added to either provider can't silently go undescribed here.
+#: with `AZURE_DEVOPS_SENTINEL_ENV_VAR`, `AZURE_DEVOPS_ENV_VARS`, and
+#: `_AZURE_DEVOPS_POLICY_ENV_VARS`, so a variable added to any of them
+#: can't silently go undescribed here.
 _AZURE_DEVOPS_VAR_DESCRIPTIONS: dict[str, str] = {
     AZURE_DEVOPS_SENTINEL_ENV_VAR: "auto-detection sentinel",
     "BUILD_REPOSITORY_NAME": "repository (required)",
@@ -46,12 +68,27 @@ _AZURE_DEVOPS_VAR_DESCRIPTIONS: dict[str, str] = {
     "SYSTEM_PULLREQUEST_PULLREQUESTNUMBER": "pull request id, GitHub-backed repository",
     "BUILD_BUILDID": "build id",
     "BUILD_REPOSITORY_URI": "source URL",
+    "SYSTEM_COLLECTIONURI": "organization URL (used by the azure_devops policy source)",
+    "SYSTEM_TEAMPROJECT": "project name (used by the azure_devops policy source)",
+}
+
+#: Mirrors `_AZURE_DEVOPS_VAR_DESCRIPTIONS`, for `github_actions`.
+#: `tests/unit/test_cli_context.py` asserts this stays exactly in sync
+#: with `GITHUB_ACTIONS_SENTINEL_ENV_VAR` and `GITHUB_ACTIONS_ENV_VARS`.
+_GITHUB_ACTIONS_VAR_DESCRIPTIONS: dict[str, str] = {
+    GITHUB_ACTIONS_SENTINEL_ENV_VAR: "auto-detection sentinel",
+    "GITHUB_REPOSITORY": "repository (required)",
+    "GITHUB_SHA": "commit (required)",
+    "GITHUB_REF": "branch/tag ref, non-PR trigger",
+    "GITHUB_HEAD_REF": "branch, PR trigger",
+    "GITHUB_RUN_ID": "build id",
+    "GITHUB_SERVER_URL": "source URL (combined with GITHUB_REPOSITORY)",
 }
 
 
 @dataclass(frozen=True, slots=True)
 class EnvVarStatus:
-    """One environment variable this project reads for `azure_devops`, and its current value."""
+    """One environment variable this project reads for a CI platform, and its current value."""
 
     name: str
     description: str
@@ -65,15 +102,30 @@ class ContextReport:
     requested: PlatformOption
     selected: Platform
     azure_devops_vars: tuple[EnvVarStatus, ...]
+    github_actions_vars: tuple[EnvVarStatus, ...]
     resolved: ExecutionContext | None
     error: str | None
 
 
 def _azure_devops_var_statuses(env: Mapping[str, str]) -> tuple[EnvVarStatus, ...]:
-    all_names = (AZURE_DEVOPS_SENTINEL_ENV_VAR, *AZURE_DEVOPS_ENV_VARS)
+    all_names = (
+        AZURE_DEVOPS_SENTINEL_ENV_VAR,
+        *AZURE_DEVOPS_ENV_VARS,
+        *_AZURE_DEVOPS_POLICY_ENV_VARS,
+    )
     return tuple(
         EnvVarStatus(
             name=name, description=_AZURE_DEVOPS_VAR_DESCRIPTIONS[name], value=env.get(name)
+        )
+        for name in all_names
+    )
+
+
+def _github_actions_var_statuses(env: Mapping[str, str]) -> tuple[EnvVarStatus, ...]:
+    all_names = (GITHUB_ACTIONS_SENTINEL_ENV_VAR, *GITHUB_ACTIONS_ENV_VARS)
+    return tuple(
+        EnvVarStatus(
+            name=name, description=_GITHUB_ACTIONS_VAR_DESCRIPTIONS[name], value=env.get(name)
         )
         for name in all_names
     )
@@ -93,11 +145,12 @@ def gather_report(
     lets escape.
     """
     provider = resolve_context_provider(platform=platform, workspace_path=workspace_path, env=env)
-    selected = (
-        Platform.AZURE_DEVOPS
-        if isinstance(provider, AzureDevOpsContextProvider)
-        else Platform.LOCAL
-    )
+    if isinstance(provider, AzureDevOpsContextProvider):
+        selected = Platform.AZURE_DEVOPS
+    elif isinstance(provider, GitHubActionsContextProvider):
+        selected = Platform.GITHUB_ACTIONS
+    else:
+        selected = Platform.LOCAL
 
     try:
         resolved: ExecutionContext | None = provider.resolve()
@@ -110,6 +163,7 @@ def gather_report(
         requested=platform,
         selected=selected,
         azure_devops_vars=_azure_devops_var_statuses(env),
+        github_actions_vars=_github_actions_var_statuses(env),
         resolved=resolved,
         error=error,
     )
@@ -137,24 +191,32 @@ def render_report(report: ContextReport) -> str:
     lines = [f"Platform: {report.selected.value} ({how})", ""]
 
     lines.append("Azure Pipelines environment (checked regardless of the platform selected):")
-    name_width = max(len(status.name) for status in report.azure_devops_vars)
+    azure_name_width = max(len(status.name) for status in report.azure_devops_vars)
     for status in report.azure_devops_vars:
         shown = status.value if status.value is not None else "not set"
-        lines.append(f"  {status.name:<{name_width}}  {shown:<20} — {status.description}")
+        lines.append(f"  {status.name:<{azure_name_width}}  {shown:<20} — {status.description}")
+    lines.append("")
+
+    lines.append("GitHub Actions environment (checked regardless of the platform selected):")
+    github_name_width = max(len(status.name) for status in report.github_actions_vars)
+    for status in report.github_actions_vars:
+        shown = status.value if status.value is not None else "not set"
+        lines.append(f"  {status.name:<{github_name_width}}  {shown:<20} — {status.description}")
     lines.append("")
 
     surprising_fallback = (
         report.requested is PlatformOption.AUTO
         and report.selected is Platform.LOCAL
         and all(status.value is None for status in report.azure_devops_vars)
+        and all(status.value is None for status in report.github_actions_vars)
     )
     if surprising_fallback:
         lines.append(
             "Every variable above is unset, so `auto` selected `local`. If this process is "
-            "meant to be running inside an Azure Pipelines agent, its environment was not "
-            "passed into this one — a `docker run` invocation must forward each variable "
-            'explicitly with `-e VAR` (see README.md, "Container image"). If this really is '
-            "a local run, this is expected and there is nothing to fix."
+            "meant to be running inside a CI platform's own runner or agent, its environment "
+            "was not passed into this one — a `docker run` invocation must forward each "
+            'variable explicitly with `-e VAR` (see README.md, "Container image"). If this '
+            "really is a local run, this is expected and there is nothing to fix."
         )
         lines.append("")
 

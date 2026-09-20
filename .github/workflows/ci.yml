@@ -114,8 +114,16 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
 
+      - name: Verify --platform auto detects github_actions on this real runner
+        # The only way to actually exercise `linceo.providers.detection.detect_platform`'s
+        # GitHub Actions branch and `linceo.providers.github_actions` against a real
+        # GITHUB_* environment (ADR §1, §10) — dogfooding this project's own tool.
+        run: |
+          uv run linceo context --platform auto | tee linceo-context.txt
+          grep -q "Platform: github_actions (auto-detected)" linceo-context.txt
+
       - name: linceo scan secrets (dogfooding this project's own tool)
-        run: uv run linceo scan secrets --format sarif > linceo-secrets.sarif
+        run: uv run linceo scan secrets --platform auto --format sarif > linceo-secrets.sarif
 
       - name: Upload SARIF
         if: always()
@@ -181,8 +189,13 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
 
+      - name: Verify --platform auto detects github_actions on this real runner
+        run: |
+          uv run linceo context --platform auto | tee linceo-context.txt
+          grep -q "Platform: github_actions (auto-detected)" linceo-context.txt
+
       - name: linceo scan sca (dogfooding this project's own tool)
-        run: uv run linceo scan sca --format sarif > linceo-sca.sarif
+        run: uv run linceo scan sca --platform auto --format sarif > linceo-sca.sarif
 
       - name: Upload SARIF
         if: always()
