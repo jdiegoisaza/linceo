@@ -216,7 +216,7 @@ def test_fetch_wraps_any_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
         source.fetch()
 
 
-# --- 401/403 permission hint (ADR §8.4, task: identidad del build) -------------
+# --- HTTP failure hints: 401/403 (identidad del build) and 404 (ambiguo) -------
 
 
 def _status_error(status_code: int) -> httpx.HTTPStatusError:
@@ -274,14 +274,14 @@ def test_fetch_omits_the_permission_hint_for_a_custom_token_env(
     assert "build identity" not in str(exc_info.value)
 
 
-def test_fetch_omits_the_permission_hint_for_an_unrelated_status_code(
+def test_fetch_omits_every_hint_for_an_unrelated_status_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
     monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
 
     def _raising_get(*_args: object, **_kwargs: object) -> _FakeResponse:
-        raise _status_error(404)
+        raise _status_error(500)
 
     monkeypatch.setattr(httpx, "get", _raising_get)
     source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
@@ -290,6 +290,61 @@ def test_fetch_omits_the_permission_hint_for_an_unrelated_status_code(
         source.fetch()
 
     assert "build identity" not in str(exc_info.value)
+    assert "four different causes" not in str(exc_info.value)
+
+
+def test_fetch_names_all_four_causes_for_a_404_with_the_default_token_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact bug report this guards: Azure DevOps' 404 collapses four distinct causes into
+    one status code, and used to just repeat httpx's own bare error instead of naming them."""
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    monkeypatch.setenv(DEFAULT_TOKEN_ENV_VAR, "build-identity-token")
+
+    def _raising_get(*_args: object, **_kwargs: object) -> _FakeResponse:
+        raise _status_error(404)
+
+    monkeypatch.setattr(httpx, "get", _raising_get)
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError, match="four different causes") as exc_info:
+        source.fetch()
+
+    message = str(exc_info.value)
+    assert "'security-baseline' does not exist" in message
+    assert "'policy.toml' does not exist in that repository" in message
+    assert "not on the repository's default branch" in message
+    assert f"identity behind {DEFAULT_TOKEN_ENV_VAR} lacks Read permission" in message
+    # Never the 401/403 hint's own single-cause framing — a 404 is never
+    # attributable to just one of the four with any confidence.
+    assert "the most likely cause" not in message
+
+
+def test_fetch_names_all_four_causes_for_a_404_with_a_custom_token_env_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike the 401/403 hint, the 404 hint is not narrowed to the default `token_env` — Azure
+    DevOps hides a permission denial behind 404 for a PAT exactly as it does for the build's own
+    identity, so leaving this hint out for a custom token would silently drop a real cause."""
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    monkeypatch.setenv("MY_TOKEN", "pat-value")
+
+    def _raising_get(*_args: object, **_kwargs: object) -> _FakeResponse:
+        raise _status_error(404)
+
+    monkeypatch.setattr(httpx, "get", _raising_get)
+    source = AzureDevOpsPolicySource(
+        repository="security-baseline",
+        path="policy.toml",
+        token_env="MY_TOKEN",  # noqa: S106 -- an env var *name*, not a credential value (ADR §9)
+    )
+
+    with pytest.raises(RemotePolicyFetchError, match="four different causes") as exc_info:
+        source.fetch()
+
+    assert "identity behind MY_TOKEN lacks Read permission" in str(exc_info.value)
 
 
 def test_fetch_without_the_remote_config_extra_installed_is_an_actionable_error(
@@ -471,3 +526,26 @@ def test_azure_pipelines_template_maps_system_access_token_via_its_own_env_block
     script = template_path.read_text(encoding="utf-8")
 
     assert f"{DEFAULT_TOKEN_ENV_VAR}: $(System.AccessToken)" in script
+
+
+def test_azure_pipelines_template_mounts_a_persistent_policy_cache_directory() -> None:
+    """docs/ADOPTION.md, "La caché local no sobrevive un `docker run` efímero": without a host
+    mount surviving between jobs, `PolicySourceStatus.state == cached` is unreachable under
+    `docker run --rm` — every failed fetch degrades straight to `unavailable`, regardless of how
+    many earlier runs succeeded.
+    """
+    template_path = (
+        Path(__file__).resolve().parents[2] / "azure-pipelines" / "templates" / "linceo-scan.yml"
+    )
+    script = template_path.read_text(encoding="utf-8")
+
+    # `$(Agent.TempDirectory)` is documented as cleared between jobs; only
+    # `$(Agent.ToolsDirectory)` persists across runs on the same agent.
+    assert "$(Agent.ToolsDirectory)" in script
+    assert "mkdir -p" in script
+    assert "chmod 0777" in script
+    # The mount target and the value `LINCEO_POLICY_CACHE_DIR` is set to
+    # must be the exact same container-side path, or the container would
+    # write its cache somewhere the host mount never actually covers.
+    assert "LINCEO_POLICY_CACHE_DIR=${LINCEO_POLICY_CACHE_CONTAINER_DIR}" in script
+    assert '-v "${LINCEO_POLICY_CACHE_HOST_DIR}:${LINCEO_POLICY_CACHE_CONTAINER_DIR}"' in script

@@ -171,7 +171,10 @@ repository = "security-baseline"   # name only, never a URL
 # path, project, token_env are all optional — see the ADR amendment for defaults
 ```
 
-Fetching one requires the `linceo[remote-config]` extra:
+Fetching one requires the `linceo[remote-config]` extra — already bundled
+in the reference container image (ADR R4: the primary distribution
+vehicle, and remote policy resolution is a pipeline feature). Only a
+`pip install`ed `linceo` needs it added explicitly:
 
 ```bash
 pip install 'linceo[remote-config]'
@@ -202,7 +205,15 @@ own resolved organization/project/repository/path so two tenants of a
 shared runner never collide), or to the local document alone if there is no
 cache yet — always declared prominently in the report, with the cached
 copy's own age, the same `stale_data` principle §5 already applies to a
-tool's own vulnerability database. The bearer token itself is never logged,
+tool's own vulnerability database. That fallback only ever has something to
+use if the cache directory itself survives between runs — the reference
+template mounts a persistent one by default (`docs/ADOPTION.md`, "La caché
+local, y por qué la plantilla monta un volumen para ella"); a bare
+`docker run --rm` with no such mount starts every run with an empty cache.
+A 404 from Azure DevOps is reported with all four of its possible causes
+named explicitly (repository, path, branch, permissions — see the same
+doc, "Diagnosticando un 404"), never just the bare HTTP status. The bearer
+token itself is never logged,
 cached, or otherwise persisted (ADR §9).
 
 ## Development

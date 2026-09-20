@@ -32,7 +32,11 @@
 # regardless of permissions): pass it via the `policyRepoToken` parameter
 # below (a reference to a secret pipeline variable, never a literal value)
 # and declare `token_env = "LINCEO_POLICY_TOKEN"` in the scanned
-# repository's own `.devsecops/config.toml` to use it.
+# repository's own `.devsecops/config.toml` to use it. This template also
+# mounts a cache directory under `$(Agent.ToolsDirectory)` by default, so
+# the "last known good" policy document actually survives between runs on
+# a self-hosted agent instead of starting empty on every `docker run --rm`
+# (docs/ADOPTION.md, "La caché local no sobrevive un `docker run` efímero").
 #
 # Usage (see the working example for the full picture):
 #
@@ -206,12 +210,46 @@ steps:
         -e LINCEO_POLICY_TOKEN
       )
 
-      echo "Running: docker run --rm ${AZURE_DEVOPS_ENV_ARGS[*]} ${REMOTE_POLICY_ENV_ARGS[*]} -v ${SOURCES_DIR}:/workspace ${IMAGE} ${LINCEO_ARGS[*]}"
+      # Persistent cache for the remote policy document's last known good
+      # copy (ADR §8.4; docs/ADOPTION.md, "La caché local no sobrevive un
+      # `docker run` efímero"). Without this, `docker run --rm` — every
+      # invocation this template makes — throws away the container's own
+      # filesystem the moment the step ends: `PolicySourceStatus.state =
+      # cached` becomes unreachable, and a fetch failure always degrades
+      # straight to `unavailable`, no matter how many times it succeeded on
+      # earlier runs. `$(Agent.ToolsDirectory)` is the one Azure Pipelines
+      # directory explicitly documented as *not* cleared between jobs on
+      # the same agent — unlike `$(Agent.TempDirectory)`, which is. On a
+      # Microsoft-hosted agent (a fresh VM every run) this still starts
+      # empty each time, exactly as before — never worse; on a self-hosted
+      # agent, the common case for a pipeline that needs Docker at all,
+      # this is what makes the cache actually survive between runs.
+      #
+      # `chmod 0777` on the host directory: the container always runs as a
+      # fixed non-root uid (1000, ADR R4), which essentially never matches
+      # this agent's own host user — a bind mount shares host permissions
+      # exactly as they are, with no uid remapping, so a directory left at
+      # its default, more restrictive mode would simply be unwritable from
+      # inside the container. The cached document itself is not a secret
+      # (ADR §9 — the token that fetched it never reaches this file, only
+      # the document's own content does); `write_cached_policy` still
+      # creates the cached *file* itself owner-only (0600) on every write
+      # regardless, so this permissive directory mode only ever affects who
+      # can list or create entries in it, never who can read one once
+      # written by a different uid.
+      LINCEO_POLICY_CACHE_CONTAINER_DIR=/var/cache/linceo-remote-policy
+      LINCEO_POLICY_CACHE_HOST_DIR="$(Agent.ToolsDirectory)/linceo/remote-policy-cache"
+      mkdir -p "${LINCEO_POLICY_CACHE_HOST_DIR}"
+      chmod 0777 "${LINCEO_POLICY_CACHE_HOST_DIR}"
+      REMOTE_POLICY_ENV_ARGS+=(-e "LINCEO_POLICY_CACHE_DIR=${LINCEO_POLICY_CACHE_CONTAINER_DIR}")
+
+      echo "Running: docker run --rm ${AZURE_DEVOPS_ENV_ARGS[*]} ${REMOTE_POLICY_ENV_ARGS[*]} -v ${SOURCES_DIR}:/workspace -v ${LINCEO_POLICY_CACHE_HOST_DIR}:${LINCEO_POLICY_CACHE_CONTAINER_DIR} ${IMAGE} ${LINCEO_ARGS[*]}"
 
       docker run --rm \
         "${AZURE_DEVOPS_ENV_ARGS[@]}" \
         "${REMOTE_POLICY_ENV_ARGS[@]}" \
         -v "${SOURCES_DIR}:/workspace" \
+        -v "${LINCEO_POLICY_CACHE_HOST_DIR}:${LINCEO_POLICY_CACHE_CONTAINER_DIR}" \
         "${IMAGE}" \
         "${LINCEO_ARGS[@]}" \
         > "${REPORT_FILE}"

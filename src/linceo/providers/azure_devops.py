@@ -405,32 +405,75 @@ class AzureDevOpsPolicySource:
             response = httpx.get(url, params=params, headers=headers, timeout=10.0)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            hint = _permission_hint(exc, token_env=self.token_env, repository=self.repository)
+            hint = _error_hint(
+                exc, token_env=self.token_env, repository=self.repository, path=self.path
+            )
             msg = f"failed to fetch {self.repository}/{self.path} from Azure DevOps: {exc}{hint}"
             raise RemotePolicyFetchError(msg) from exc
 
         return FetchedPolicy(content=response.text)
 
 
-def _permission_hint(exc: Exception, *, token_env: str, repository: str) -> str:
-    """The likely-cause hint appended to a 401/403 raised through the build's own identity.
+def _error_hint(exc: Exception, *, token_env: str, repository: str, path: str) -> str:
+    """The likely-cause hint appended to an HTTP failure this project can actually explain.
 
-    Deliberately narrow: only for `httpx.HTTPStatusError` with status 401 or
-    403, and only when `token_env` is still `DEFAULT_TOKEN_ENV_VAR` — a
-    custom `token_env` means the operator already chose a specific
-    credential (a Personal Access Token, typically), whose own permissions
-    are that operator's to reason about; naming a "build identity" cause
-    there would be actively misleading. For the default case, though, a 401
-    or 403 has one overwhelmingly likely cause: nobody has yet granted the
-    running build's own identity permission to read the policy repository —
-    a repository-permissions problem this project can name specifically,
-    rather than leaving an operator to guess from a bare HTTP status.
+    Deliberately narrow — `""` (no hint at all) for anything but the two
+    specific `httpx.HTTPStatusError` codes below, appended to the bare
+    `httpx` error message rather than replacing it either way.
     """
     import httpx
 
-    if not isinstance(exc, httpx.HTTPStatusError) or token_env != DEFAULT_TOKEN_ENV_VAR:
+    if not isinstance(exc, httpx.HTTPStatusError):
         return ""
-    if exc.response.status_code not in (401, 403):
+    status_code = exc.response.status_code
+
+    if status_code == 404:
+        return _not_found_hint(token_env=token_env, repository=repository, path=path)
+    if status_code in (401, 403):
+        return _permission_hint(token_env=token_env, repository=repository)
+    return ""
+
+
+def _not_found_hint(*, token_env: str, repository: str, path: str) -> str:
+    """Azure DevOps' own 404 collapses at least four distinct causes into one status code.
+
+    Unlike the 401/403 hint below, this one is never narrowed to the
+    default `token_env`: every one of the four causes can happen
+    regardless of which credential (or none) made the request — including
+    the fourth, since Azure DevOps applies the same permission-hides-as-404
+    behavior to a Personal Access Token exactly as it does to the build's
+    own identity. Reported unconditionally rather than guessed at, so
+    nobody has to rediscover this by elimination the way the report that
+    prompted this message did.
+    """
+    return (
+        f" — Azure DevOps returns 404 for at least four different causes, indistinguishable "
+        f"from this response alone: (1) {repository!r} does not exist, or not in the "
+        "organization/project this fetch resolved; "
+        f"(2) {path!r} does not exist in that repository; "
+        f"(3) {path!r} exists, but not on the repository's default branch — this fetch always "
+        "reads the default branch, never a specific one; "
+        f"(4) the identity behind {token_env} lacks Read permission on the repository — Azure "
+        "DevOps deliberately returns 404, not 403, when permission is denied, to avoid revealing "
+        "a private repository's existence to an unauthorized caller."
+    )
+
+
+def _permission_hint(*, token_env: str, repository: str) -> str:
+    """The likely-cause hint appended to a 401/403 raised through the build's own identity.
+
+    Deliberately narrow: only when `token_env` is still
+    `DEFAULT_TOKEN_ENV_VAR` — a custom `token_env` means the operator
+    already chose a specific credential (a Personal Access Token,
+    typically), whose own permissions are that operator's to reason about;
+    naming a "build identity" cause there would be actively misleading.
+    For the default case, though, a 401 or 403 (as opposed to a 404 —
+    `_not_found_hint` — Azure DevOps returns either depending on the
+    endpoint and circumstances) has one overwhelmingly likely cause:
+    nobody has yet granted the running build's own identity permission to
+    read the policy repository.
+    """
+    if token_env != DEFAULT_TOKEN_ENV_VAR:
         return ""
     return (
         f" — the most likely cause: the build identity behind {DEFAULT_TOKEN_ENV_VAR} has no "

@@ -1957,6 +1957,75 @@ docs/ADOPTION.md, "Fuente remota de la política"; no es el mismo patrón
 que motiva esta enmienda (ninguna función falta aquí, la caché ya hace lo
 que se le pidió) y por eso no se trata como un cuarto caso.
 
+#### Enmienda (2026-09-19, prueba en pipeline real): 404 ambiguo, y el hallazgo adyacente ya resuelto
+
+Dos correcciones más, ambas encontradas probando la configuración remota
+contra un pipeline de Azure DevOps real — no en revisión de código, sino en
+uso.
+
+**1. Un 404 de Azure DevOps no significa una sola cosa.** El manejo de
+errores hasta aquí distinguía 401/403 (credencial rechazada) de todo lo
+demás, incluido 404, que simplemente repetía el mensaje crudo de `httpx`.
+En la práctica, Azure DevOps devuelve el mismo 404 para al menos cuatro
+causas indistinguibles entre sí: el repositorio no existe (o no en la
+organización/proyecto resuelto), el archivo no existe en esa ruta, el
+archivo existe pero no en la rama por defecto (esta descarga nunca lee
+otra), o la identidad que pregunta no tiene permiso de lectura — Azure
+DevOps devuelve 404 en vez de 403 específicamente para no revelar la
+existencia de un repositorio privado a quien no tiene acceso. Sin nombrar
+las cuatro, cada una se descarta a mano por eliminación — exactamente el
+costo que motivó este arreglo.
+
+`_error_hint` (antes `_permission_hint`, renombrada al dejar de ser
+específica de un solo código) ahora despacha por código de estado:
+`_not_found_hint` para 404, `_permission_hint` para 401/403. A diferencia
+del 401/403 — donde el "identidad del build" solo tiene sentido cuando
+`token_env` sigue en su valor por defecto (§8.4 arriba) — el 404 nombra la
+cuarta causa (permiso denegado disfrazado de 404) **sin** esa condición:
+Azure DevOps aplica el mismo disfraz a un Personal Access Token tanto como
+a la identidad del build, así que omitir la pista para un `token_env`
+propio callaría una causa real, no solo una engañosa.
+
+**2. El hallazgo adyacente de la enmienda anterior ya no queda sin
+resolver.** Ahí quedó documentado, deliberadamente sin corregir en ese
+momento, que la caché vive bajo `$HOME` dentro del contenedor y que un
+`docker run --rm` — el patrón de todo `azure-pipelines/templates/linceo-scan.yml`
+— la descarta al terminar cada paso: el estado `cached` de
+`PolicySourceStatus` era, en la práctica, inalcanzable bajo ese patrón de
+despliegue, y toda falla de red degradaba directo a `unavailable`. La
+plantilla ahora monta, por defecto, `$(Agent.ToolsDirectory)/linceo/remote-policy-cache`
+del agente como `$LINCEO_POLICY_CACHE_DIR` del contenedor —
+`Agent.ToolsDirectory` es el único directorio de Azure Pipelines
+documentado explícitamente como no limpiado entre jobs del mismo agente
+(a diferencia de `Agent.TempDirectory`, que sí lo es). Esto solo ayuda en
+un agente self-hosted (el caso habitual para un pipeline que ya necesita
+Docker) — en un agente hospedado por Microsoft, cada job corre en una VM
+nueva y el directorio también empieza vacío, ni mejor ni peor que antes.
+
+El directorio del host se crea con `chmod 0777`: el contenedor corre
+siempre como el uid fijo 1000 (R4), que casi nunca coincide con el usuario
+del propio agente, y un bind mount comparte los permisos del host tal
+cual, sin remapeo de uid — un directorio con el modo restrictivo por
+defecto sería simplemente no escribible desde dentro del contenedor. Esto
+no reabre el endurecimiento de permisos de la enmienda de revisión de
+seguridad (arriba): el documento cacheado no es un secreto (el token que
+lo descargó nunca llega a ese archivo), y `write_cached_policy` sigue
+creando cada archivo individual exclusivo del propietario (`0600`) en cada
+escritura — el modo abierto del directorio solo afecta quién puede listar
+o crear entradas ahí, nunca quién puede leer una ya escrita por otro uid.
+
+**Verificación:** `tests/unit/test_azure_devops_policy_source.py` cubre
+las cuatro causas nombradas en el mensaje de un 404 (con el `token_env`
+por defecto y con uno propio, confirmando que la cuarta causa aparece en
+ambos casos), que un 401/403 y un código no relacionado (500) no heredan
+la pista del otro, y — leyendo la plantilla como texto plano, el mismo
+patrón anti-drift ya establecido — que monta `$(Agent.ToolsDirectory)`,
+crea y abre permisos sobre el directorio, y usa el mismo valor de ruta
+tanto para el mount como para `LINCEO_POLICY_CACHE_DIR`. Construir la
+etapa `python-build` de la imagen y extraer/`bash -n` el script de la
+plantilla confirmaron, respectivamente, que `[remote-config]` se instala
+de verdad y que el YAML/bash resultante sigue siendo válido.
+
 ### §8.5. Configuración por integración: dos niveles
 
 Hasta esta revisión, `GitleaksIntegration.build_command` construía un argv fijo y no

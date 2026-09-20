@@ -568,33 +568,70 @@ autenticación esté en uso (ADR §8.4: "un equipo no debería necesitar un
 pull request al repositorio de seguridad para suprimir su propio falso
 positivo").
 
-### La caché local no sobrevive un `docker run` efímero
+### La caché local, y por qué la plantilla monta un volumen para ella
 
 La imagen de referencia ya trae instalado lo necesario para descargar la
-política (`[remote-config]`, horneado en la imagen desde la corrección
-descrita en el ADR, "Enmienda... la imagen de referencia instala
-`[remote-config]`"), y cada run intenta refrescar siempre, sin ninguna
-ventana de caducidad que lo retrase. Lo que la imagen *no* resuelve por sí
-sola es dónde vive la copia de respaldo: por defecto, bajo `$HOME` dentro
-del propio contenedor — un filesystem que un `docker run --rm` (el patrón
-que la plantilla de referencia usa, y el más común en cualquier pipeline de
-CI) descarta por completo al terminar el paso.
+política (`[remote-config]`, horneado en la imagen — ADR, "la imagen de
+referencia instala `[remote-config]`"), y cada run intenta refrescar
+siempre, sin ninguna ventana de caducidad que lo retrase. Lo que la imagen
+*no* resuelve por sí sola es dónde vive la copia de respaldo: por defecto,
+bajo `$HOME` dentro del propio contenedor — un filesystem que un
+`docker run --rm` (el patrón que toda invocación de esta plantilla usa, y
+el más común en cualquier pipeline de CI) descarta por completo al
+terminar el paso.
 
-En ese patrón habitual, una descarga fallida **nunca** encuentra una copia
-en caché que usar como respaldo, sin importar cuántas veces la descarga
-haya funcionado en runs anteriores — cada `docker run` empieza con una
-caché vacía, así que el estado `cached` de `PolicySourceStatus` (ADR §8.4)
-simplemente no ocurre bajo este patrón de despliegue; una falla de red
-degrada directo a `unavailable` (solo el documento local), nunca a "la
-última copia buena conocida". Esto no es un defecto — es la consecuencia
-esperada de que el contenedor sea efímero, y degradar a `unavailable` en
-vez de fallar el run sigue siendo exactamente lo correcto (ADR §5).
+Sin nada más, en ese patrón una descarga fallida **nunca** encontraría una
+copia en caché que usar como respaldo, sin importar cuántas veces la
+descarga hubiera funcionado en runs anteriores: cada `docker run`
+empezaría con una caché vacía, así que el estado `cached` de
+`PolicySourceStatus` (ADR §8.4) sencillamente no ocurriría bajo este
+patrón de despliegue — una falla de red degradaría directo a `unavailable`
+(solo el documento local), nunca a "la última copia buena conocida",
+justo donde esa copia más hace falta.
 
-**Si se quiere que la caché sobreviva entre runs** — para que una falla de
-red puntual siga teniendo una copia reciente de la que degradar, en vez de
-caer directo a "solo lo local" — `$LINCEO_POLICY_CACHE_DIR` debe apuntar a
-un directorio montado desde un volumen que persista entre invocaciones del
-contenedor (un caché de agente self-hosted, por ejemplo), no al filesystem
-efímero por defecto. La plantilla de referencia no monta ninguno por
-defecto — hacerlo es una decisión de infraestructura de quien opera el
-pipeline, fuera del alcance de esta plantilla genérica.
+**Por eso la plantilla de referencia ya monta, por defecto, un directorio
+bajo `$(Agent.ToolsDirectory)`** — el único directorio de Azure Pipelines
+explícitamente documentado como *no* limpiado entre jobs del mismo agente
+(a diferencia de `$(Agent.TempDirectory)`, que sí lo es) — como el
+`$LINCEO_POLICY_CACHE_DIR` del contenedor. Nada que configurar para
+beneficiarse de esto: cualquier pipeline que use la plantilla ya lo tiene.
+
+**Este mecanismo solo ayuda de verdad en un agente self-hosted** — el caso
+habitual para un pipeline que de por sí necesita Docker. En un agente
+hospedado por Microsoft, cada job corre en una VM nueva, así que ese
+directorio también empieza vacío en cada run; el mount no lo empeora (es
+exactamente el mismo comportamiento que sin él), simplemente no puede
+ayudar ahí donde no hay ninguna máquina que se reutilice entre runs.
+
+**Sobre el directorio compartido en sí:** la plantilla lo crea con permisos
+abiertos (`chmod 0777`) porque el contenedor corre siempre con un uid fijo
+no privilegiado (1000, ADR R4) que casi nunca coincide con el usuario del
+propio agente, y un bind mount comparte los permisos del host tal cual,
+sin ningún remapeo de uid. El documento de política cacheado no es en sí
+mismo un secreto (ADR §9 — el token que lo descargó nunca llega a ese
+archivo); `write_cached_policy` sigue creando cada archivo individual
+exclusivo del propietario (`0600`) en cada escritura, así que ese permiso
+abierto del directorio solo afecta quién puede listar o crear entradas
+ahí, nunca quién puede leer una ya escrita por otro uid.
+
+### Diagnosticando un 404 al descargar la política
+
+Azure DevOps devuelve el mismo `404 Not Found` para al menos cuatro causas
+distintas, indistinguibles entre sí a partir de solo la respuesta:
+
+1. El repositorio de política no existe — o no en la organización/proyecto
+   que esta descarga resolvió (revisar `repository` y, si aplica,
+   `project` en `[remote_policy]`).
+2. El archivo no existe en la ruta declarada (`path`, default
+   `"policy.toml"`).
+3. El archivo existe, pero no en la rama por defecto del repositorio — esta
+   descarga siempre lee la rama por defecto, nunca una específica.
+4. La identidad que hace la petición no tiene permiso de lectura sobre el
+   repositorio. Azure DevOps devuelve deliberadamente 404, no 403, cuando
+   el permiso falta — para no revelar la existencia de un repositorio
+   privado a quien no tiene acceso — así que esta causa es indistinguible
+   de las otras tres sin descartarlas una por una.
+
+El mensaje de error de `linceo` ya nombra las cuatro explícitamente, en vez
+de repetir el error crudo de `httpx` sin más contexto — no hace falta
+descartarlas a mano una por una como sí hizo falta antes de esta revisión.
