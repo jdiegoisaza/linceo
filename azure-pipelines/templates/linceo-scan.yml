@@ -21,6 +21,19 @@
 #     (a `Docker@2` task with `command: login`, or a preceding `docker
 #     login`) before the step this template expands to.
 #
+# Remote policy (ADR R2, §8.4; docs/ADOPTION.md, "Fuente remota de la
+# política"): if the scanned repository declares `[remote_policy]` in its
+# own `.devsecops/config.toml`, this template already forwards everything
+# needed for the common case — a policy repository in the *same*
+# organization — with nothing to configure here: the running build's own
+# identity (`System.AccessToken`) is mapped and forwarded by default. A
+# policy repository in a *different* organization needs a Personal Access
+# Token instead (that OAuth identity cannot cross organizations at all,
+# regardless of permissions): pass it via the `policyRepoToken` parameter
+# below (a reference to a secret pipeline variable, never a literal value)
+# and declare `token_env = "LINCEO_POLICY_TOKEN"` in the scanned
+# repository's own `.devsecops/config.toml` to use it.
+#
 # Usage (see the working example for the full picture):
 #
 #   steps:
@@ -100,6 +113,22 @@ parameters:
     # reference name if overridden: letters, digits, and underscores only
     # (no hyphens or dots) — the default already satisfies this.
 
+  - name: policyRepoToken
+    type: string
+    default: ''
+    # A credential for a remote policy repository outside this
+    # organization (docs/ADOPTION.md, "Fuente remota de la política") —
+    # the build's own identity (`System.AccessToken`, forwarded by default
+    # below with nothing to set here) cannot reach a different
+    # organization at all, regardless of permissions. Pass a reference to
+    # a secret pipeline variable, e.g. `$(MyOrgPolicyPat)` — never a
+    # literal token value (ADR §9) — and declare `token_env =
+    # "LINCEO_POLICY_TOKEN"` in the scanned repository's own
+    # `.devsecops/config.toml` to use it; empty (the default) forwards an
+    # empty, unused variable, exactly as harmless as `System.AccessToken`
+    # being forwarded to a repository that declares no `[remote_policy]`
+    # at all.
+
 steps:
   - bash: |
       set -u
@@ -154,10 +183,34 @@ steps:
         -e BUILD_REPOSITORY_URI
       )
 
-      echo "Running: docker run --rm ${AZURE_DEVOPS_ENV_ARGS[*]} -v ${SOURCES_DIR}:/workspace ${IMAGE} ${LINCEO_ARGS[*]}"
+      # A second, independent allowlist — for `linceo.core.ports.PolicySource`
+      # (ADR R2, §8.4), not for `ContextProvider` above — forwarded
+      # unconditionally so a repository that declares `[remote_policy]` in
+      # its own .devsecops/config.toml needs nothing else from this
+      # pipeline (docs/ADOPTION.md, "Fuente remota de la política"): a
+      # repository that declares none simply never constructs
+      # `AzureDevOpsPolicySource`, so these three sit unused, exactly as
+      # harmlessly as `BUILD_REPOSITORY_URI` does for a `secrets`-only scan.
+      # `SYSTEM_ACCESSTOKEN` carries the running build's own OAuth
+      # identity — read-scoped to this job, expiring with it, requiring no
+      # PAT anyone has to create or rotate — mapped into this step's own
+      # process environment by the `env:` block below (Azure Pipelines
+      # does not forward `System.AccessToken` into a step automatically the
+      # way it does `System.CollectionUri`/`System.TeamProject`; an
+      # explicit mapping is required before there is anything here for
+      # `-e SYSTEM_ACCESSTOKEN` to even forward into the container).
+      REMOTE_POLICY_ENV_ARGS=(
+        -e SYSTEM_COLLECTIONURI
+        -e SYSTEM_TEAMPROJECT
+        -e SYSTEM_ACCESSTOKEN
+        -e LINCEO_POLICY_TOKEN
+      )
+
+      echo "Running: docker run --rm ${AZURE_DEVOPS_ENV_ARGS[*]} ${REMOTE_POLICY_ENV_ARGS[*]} -v ${SOURCES_DIR}:/workspace ${IMAGE} ${LINCEO_ARGS[*]}"
 
       docker run --rm \
         "${AZURE_DEVOPS_ENV_ARGS[@]}" \
+        "${REMOTE_POLICY_ENV_ARGS[@]}" \
         -v "${SOURCES_DIR}:/workspace" \
         "${IMAGE}" \
         "${LINCEO_ARGS[@]}" \
@@ -188,6 +241,17 @@ steps:
     name: ${{ parameters.stepName }}
     displayName: 'linceo scan: ${{ parameters.stepName }}'
     continueOnError: ${{ not(parameters.blocking) }}
+    env:
+      # Azure Pipelines never exposes `System.AccessToken` in a step's own
+      # process environment on its own — unlike every other predefined
+      # variable this template forwards, it requires this explicit `env:`
+      # mapping before it exists to be read at all, let alone forwarded into
+      # the container with `-e SYSTEM_ACCESSTOKEN` above. See
+      # REMOTE_POLICY_ENV_ARGS's own comment for what this is for.
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      # See the `policyRepoToken` parameter's own comment — empty unless a
+      # pipeline using this template sets it.
+      LINCEO_POLICY_TOKEN: ${{ parameters.policyRepoToken }}
 
   - task: PublishPipelineArtifact@1
     displayName: 'Publish SARIF: ${{ parameters.stepName }}'

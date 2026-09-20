@@ -100,10 +100,32 @@ COPY src/ src/
 # does not forward the distribution name for, verified empirically against
 # this exact build context; safe to rely on regardless, since this
 # `uv build` only ever builds the one package in it.
+#
+# `[remote-config]`: installed into the image on purpose, not left to
+# whoever runs it (ADR R2, §8.4). R4 makes the container image the primary
+# distribution vehicle, and remote policy resolution is a *pipeline*
+# feature — the container is exactly where a pipeline runs it. R2's own
+# invariant is unaffected by this: it governs the base *wheel* built above
+# (`uv build --wheel`, no extras — `pip install linceo` alone still gains
+# no HTTP client), not what a downstream distribution of that wheel chooses
+# to bundle. Omitting this was a real bug, not a hypothetical one: a
+# `[remote_policy]`-declaring pipeline running the reference image degraded
+# to `unavailable` on every single run, unconditionally, with a WARN whose
+# own suggested fix (`pip install 'linceo[remote-config]'`) cannot even be
+# carried out inside this image (no writable venv for an unprivileged
+# `USER 1000:1000` to install into, and no expectation that an operator
+# ever shells into a running container to begin with). `set -- /dist/*.whl`
+# first, rather than inlining the glob into the extras expression
+# directly: `/dist/*.whl[remote-config]` would hand the shell a
+# bracket-expression glob instead of a plain suffix, matching some
+# unrelated single character instead of appending the extras marker to the
+# resolved filename. `$1` is exactly the one wheel `uv build` above always
+# produces for this one package.
 RUN SETUPTOOLS_SCM_PRETEND_VERSION="${LINCEO_VERSION}" \
       uv build --wheel --out-dir /dist \
     && uv venv --python python3.12 /opt/linceo/venv \
-    && uv pip install --python /opt/linceo/venv/bin/python /dist/*.whl
+    && set -- /dist/*.whl \
+    && uv pip install --python /opt/linceo/venv/bin/python "${1}[remote-config]"
 
 # ---------------------------------------------------------------------------
 # Stage: tools — fetch and checksum-verify the pinned Gitleaks and Trivy

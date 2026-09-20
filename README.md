@@ -35,7 +35,11 @@ what ships next.
 The container image is the unit of compatibility between the orchestrator
 and the exact tool versions it invokes: it bundles pinned, checksum-verified
 builds of Gitleaks and Trivy, plus Trivy's vulnerability database
-pre-fetched at build time, so a scan runs fully offline by default.
+pre-fetched at build time, so a scan runs fully offline by default. It also
+installs the `linceo[remote-config]` extra (see "Remote policy" below) —
+being the primary distribution vehicle (ADR R4) is exactly why remote
+policy resolution, a pipeline feature, needs to work out of the box here;
+`pip install linceo` on its own still gains no HTTP client at all (ADR R2).
 
 Pull a published release — built and pushed by
 [`.github/workflows/release.yml`](.github/workflows/release.yml), no
@@ -179,9 +183,17 @@ organization and project from the same Azure Pipelines variables
 `azure_devops` context resolution already reads
 (`SYSTEM_COLLECTIONURI`/`SYSTEM_TEAMPROJECT`), and authenticates via a
 bearer token read from the environment variable `token_env` names — never a
-value in the file itself (ADR §9). `[[exclusions]]` and `[[skipped_tools]]`
-stay local-only always; a remote document declaring either is a
-configuration error, not a silently-ignored one.
+value in the file itself (ADR §9). `token_env` defaults to
+`SYSTEM_ACCESSTOKEN` — the running build's own OAuth identity, which the
+reference `azure-pipelines/templates/linceo-scan.yml` already maps and
+forwards by default, so the common case (a policy repository in the same
+organization) needs nothing declared here at all; a repository outside
+that organization needs a Personal Access Token instead, via a custom
+`token_env` and the template's own `policyRepoToken` parameter — see
+`docs/ADOPTION.md`, "Fuente remota de la política", for both modes with
+examples. `[[exclusions]]` and `[[skipped_tools]]` stay local-only always;
+a remote document declaring either is a configuration error, not a
+silently-ignored one.
 
 A failed fetch never fails a run: it falls back to the last successfully
 fetched copy (cached under `~/.cache/linceo/remote-policy` by default, or

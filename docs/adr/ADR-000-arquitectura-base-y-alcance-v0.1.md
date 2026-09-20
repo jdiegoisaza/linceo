@@ -1600,7 +1600,7 @@ nueva sección `[remote_policy]`:
 repository = "security-baseline"     # nombre del repositorio de política
 path = "policy.toml"                 # opcional; default: "policy.toml"
 project = "platform-security"        # opcional; default: el proyecto del propio build
-token_env = "SYSTEM_ACCESSTOKEN"     # opcional; nombre de la variable con el token (§9)
+token_env = "LINCEO_POLICY_TOKEN"    # opcional; default: "SYSTEM_ACCESSTOKEN" (§9, enmienda de ergonomía)
 ```
 
 Ninguno de estos cuatro campos es un secreto ni una URL — son nombres, y por
@@ -1631,11 +1631,14 @@ de dependencia pesada que R2 existe para evitar en el paquete base.
 `token_env` nombra la variable — nunca el valor — y `AzureDevOpsPolicySource`
 la lee sólo dentro de `providers/`, enviándola como
 `Authorization: Bearer <token>`, nunca como parte de una URL o de un
-argumento de línea de comandos. El caso frecuente en Azure DevOps es
-`SYSTEM_ACCESSTOKEN`, el token OAuth del propio pipeline, disponible una vez
-habilitado "Allow scripts to access the OAuth token"; un Personal Access
-Token clásico funciona igual. Sin `token_env`, no se envía cabecera de
-autenticación — el caso de un repositorio de política legible
+argumento de línea de comandos. El caso frecuente en Azure DevOps, y el
+default de `token_env` desde la enmienda de ergonomía más abajo, es
+`SYSTEM_ACCESSTOKEN` — el token OAuth de la propia ejecución del build,
+disponible una vez habilitado "Allow scripts to access the OAuth token"; un
+Personal Access Token clásico funciona igual, con `token_env` apuntando a
+la variable que lo guarde. Cuando esa variable no existe en el entorno en
+absoluto (o `token_env` se declara explícitamente vacío), no se envía
+cabecera de autenticación — el caso de un repositorio de política legible
 anónimamente. El valor leído se mantiene envuelto en `linceo.core.secret.Secret`
 (§9, implementado por primera vez en esta revisión — ver la enmienda de
 endurecimiento más abajo) desde que sale del entorno hasta el único punto
@@ -1802,6 +1805,157 @@ La caché nunca corrió riesgo por esta vía: lo que se escribe en ella es el
 contenido de la *respuesta* (el documento de política), nunca la petición —
 el token no tiene ningún camino hacia el archivo cacheado, con o sin
 `Secret`.
+
+#### Enmienda (2026-09-19, ergonomía): identidad del build por defecto, sin configuración manual
+
+Hasta aquí, usar la fuente remota exigía conocer y declarar `token_env`
+a mano incluso en el caso común — un repositorio de política en la misma
+organización — y la plantilla de referencia no reenviaba ninguna de las
+variables que ese caso necesita. Corregido en tres frentes, todos en
+`AzureDevOpsPolicySource` y en `azure-pipelines/templates/linceo-scan.yml`:
+
+**1. `token_env` tiene ahora un valor por defecto: `DEFAULT_TOKEN_ENV_VAR`
+(`SYSTEM_ACCESSTOKEN`).** Antes, `None` significaba "sin autenticación" —
+inútil para el caso real, donde casi ningún repositorio de política
+verdadero es legible sin autenticar, así que en la práctica `token_env` era
+obligatorio declarar aunque el tipo dijera lo contrario. El nuevo default
+es inofensivo incluso cuando la variable no existe en el entorno (se
+resuelve a "sin token", exactamente como antes) y correcto quirúrgicamente
+cuando sí existe: la identidad OAuth de la propia ejecución del build,
+sin PAT que nadie tenga que crear ni rotar. Un `token_env = ""` explícito
+sigue siendo la vía para optar por no autenticar en absoluto, incluso con
+la variable por defecto presente en el entorno.
+
+**2. La plantilla de referencia mapea y reenvía todo lo que este caso
+necesita, por defecto.** `System.AccessToken` es la única variable de
+Azure Pipelines que este proyecto lee y que la plataforma *no* expone
+automáticamente en el entorno de un step — exige un bloque `env:` propio
+(`SYSTEM_ACCESSTOKEN: $(System.AccessToken)`) antes de que exista algo que
+reenviar al contenedor. `SYSTEM_COLLECTIONURI`/`SYSTEM_TEAMPROJECT` (que
+`AzureDevOpsPolicySource.cache_key`/`fetch` también necesitan para
+resolver organización y proyecto) sí llegan automáticamente al entorno del
+step, pero nunca cruzaban hacia el contenedor — ninguna de las tres
+variables estaba en el `docker run` de la plantilla antes de esta
+revisión. Un pipeline que use la plantilla ya no necesita saber que
+`[remote_policy]` existe para que funcione: `REMOTE_POLICY_ENV_ARGS`, un
+segundo allowlist independiente del que ya cubre `ContextProvider`,
+reenvía las tres siempre, inofensivo cuando el repositorio escaneado no
+declara `[remote_policy]` en absoluto — la fuente remota simplemente nunca
+se construye, igual que `BUILD_REPOSITORY_URI` ya viaja sin usarse en un
+scan de solo `secrets`. El nuevo parámetro `policyRepoToken` de la
+plantilla, junto con la variable fija `LINCEO_POLICY_TOKEN`, extiende lo
+mismo al caso de un PAT para un repositorio fuera de la organización —
+ver docs/ADOPTION.md, "Fuente remota de la política", para ambos modos
+completos con ejemplos.
+
+**3. Un 401/403 con la identidad por defecto nombra la causa más probable.**
+`AzureDevOpsPolicySource.fetch` ya distinguía cualquier `httpx.HTTPError`
+del mismo modo; ahora, específicamente para `httpx.HTTPStatusError` con
+estado 401 o 403 y `token_env` todavía en su valor por defecto, el mensaje
+nombra explícitamente que la identidad del build probablemente carece de
+permiso de lectura sobre el repositorio de política, dónde concederlo
+(*Project Settings → Repositories → (repositorio) → Security*), y qué
+revisar si el repositorio de política vive en otro proyecto (*Organization
+Settings → Pipelines → Settings → Limit job authorization scope*). Cuando
+`token_env` es un valor distinto del default — un PAT que el operador ya
+eligió deliberadamente — esta pista no aparece: atribuir la causa a "la
+identidad del build" sería engañoso ahí, y solo quien generó ese PAT puede
+saber si expiró o le falta alcance.
+
+**Verificación:** `tests/unit/test_azure_devops_policy_source.py` cubre el
+nuevo default (con y sin la variable presente en el entorno, y el opt-out
+explícito con `token_env = ""`), la pista de 401/403 (para el default, para
+un `token_env` propio — donde no debe aparecer — y para un código de
+estado no relacionado), y dos comprobaciones anti-drift que leen
+`azure-pipelines/templates/linceo-scan.yml` como texto plano: que reenvía
+`-e` para cada variable en `REMOTE_POLICY_ENV_VARS`, y que mapea
+`SYSTEM_ACCESSTOKEN` vía su propio bloque `env:` — el mismo patrón que
+`tests/unit/test_cli_context.py` ya aplicaba a `ENV_VARS`.
+
+#### Enmienda (2026-09-19, canal principal): la imagen de referencia instala `[remote-config]`
+
+Tercer caso encontrado del mismo patrón que ya había aparecido dos veces
+antes en esta misma revisión (las variables de entorno que la plantilla no
+reenviaba; la clave de caché sin organización): una función existe en el
+código y no llega al canal por el que la mayoría de quienes usan este
+proyecto realmente lo corren. Aquí, el canal es la propia imagen de
+contenedor — R4 la declara vía de distribución **principal**, y la
+resolución de política remota es, por definición, una función de
+*pipeline*: exactamente donde la imagen corre.
+
+**El bug real, reportado con el mensaje exacto que produjo:** `Dockerfile`
+construía el wheel de `linceo` y lo instalaba en el venv de la imagen sin
+ningún extra (`uv pip install ... /dist/*.whl`, sin `[remote-config]`). Un
+repositorio con `[remote_policy]` declarado, corriendo la imagen de
+referencia dentro de un pipeline de Azure DevOps — el caso que este
+proyecto existe para servir primero — degradaba a `unavailable` en **todo**
+run, sin excepción: `httpx` nunca estaba instalado, así que `fetch` fallaba
+con `ImportError` antes de siquiera intentar la red.
+
+**Corrección:** la etapa `python-build` del `Dockerfile` instala el wheel
+con el extra: `uv pip install --python ... "${1}[remote-config]"` (`$1`
+resuelto vía `set -- /dist/*.whl`, no vía interpolar el glob directamente
+en la expresión de extras, que el shell leería como una clase de
+caracteres en vez de un sufijo literal). **El invariante de R2/§8.3 sobre
+el paquete base no cambia en absoluto:** `uv build --wheel` sigue
+construyendo el mismo wheel, sin extras, con la misma única dependencia de
+terceros (`typer-slim`) — `pip install linceo` a secas, fuera de esta
+imagen, sigue sin ganar ningún cliente HTTP. Lo que cambia es una decisión
+distinta y posterior: qué instala *esta* distribución concreta de ese
+wheel, ejerciendo exactamente la libertad que R2 ya le dejaba explícita
+("vive en un extra instalable aparte") sin tocar el propio wheel. Verificado
+construyendo la etapa `python-build` de forma aislada
+(`docker build --target python-build`) e importando `httpx` desde el venv
+resultante.
+
+**El mensaje de error, revisado en el mismo movimiento.** Antes de esta
+enmienda, el `ImportError` de `httpx` producía siempre "pip install
+'linceo[remote-config]'" — instrucción imposible de seguir dentro de un
+contenedor que corre como `USER 1000:1000`, sin venv escribible por ese
+usuario, y sin ninguna expectativa de que alguien entre a una shell dentro
+de un contenedor en ejecución para instalar algo ahí. Con la imagen ya
+corrigiendo el caso común, este mensaje debería ser prácticamente
+inalcanzable en la imagen de referencia de aquí en adelante — pero seguía siendo
+alcanzable para quien instale `linceo` con `pip install linceo` a secas
+(README, "pip install"), donde esa misma instrucción sí es correcta y
+ejecutable. En vez de intentar detectar en tiempo de ejecución "¿estoy
+dentro del contenedor de referencia?" — una pregunta que este proyecto no
+tiene hoy ningún mecanismo para responder, y que añadirlo solo para este
+mensaje sería una pieza de acoplamiento nueva y desproporcionada frente al
+problema — el mensaje ahora nombra ambos contextos explícitamente: la
+instrucción `pip install` para quien instaló así, y "esto indica una
+imagen desactualizada; actualiza o reconstruye" para quien lo vea dentro
+de la imagen de referencia. Cualquiera de los dos lectores encuentra su
+propio siguiente paso; ninguno recibe instrucción imposible de seguir.
+
+**Tercer caso del mismo patrón, revisado explícitamente — no hay un
+cuarto.** `[remote-config]` es, a la fecha de esta revisión, el único
+extra que este proyecto declara (`pyproject.toml`,
+`[project.optional-dependencies]`), y el `import httpx` dentro de
+`AzureDevOpsPolicySource.fetch`/`cache_key` es el único punto de todo
+`src/` protegido por un `try`/`except ImportError` — confirmado por
+inspección exhaustiva, no por muestreo. No hay otra función que dependa de
+un extra y quede fuera de la imagen por el mismo motivo, porque no hay otro
+extra del que pudiera quedar fuera.
+
+**Hallazgo adyacente, documentado pero deliberadamente no resuelto aquí:**
+la caché local de la política remota (§8.4 arriba) vive bajo `$HOME` (o
+`$LINCEO_POLICY_CACHE_DIR`) dentro del contenedor — un filesystem que un
+`docker run` efímero, el patrón más común en CI, descarta al terminar el
+paso. En ese patrón, la "última copia buena conocida" nunca sobrevive de
+un run al siguiente: una descarga fallida ahí siempre degrada directo a
+`unavailable` (local-only), nunca a `cached`, sin importar cuántas veces
+haya funcionado antes. Esto no es un defecto de esta implementación — la
+caché sigue haciendo exactamente su trabajo dentro de un mismo proceso, y
+degradar a `unavailable` en vez de fallar el run sigue siendo la conducta
+correcta (§5, "degradación, nunca error fatal") — es una propiedad del
+*despliegue* que vale la pena que quien opera un pipeline conozca:
+si quiere que la caché sobreviva entre runs, `$LINCEO_POLICY_CACHE_DIR`
+debe apuntar a un volumen montado que persista entre invocaciones del
+contenedor, no al filesystem efímero por defecto. Documentado en
+docs/ADOPTION.md, "Fuente remota de la política"; no es el mismo patrón
+que motiva esta enmienda (ninguna función falta aquí, la caché ya hace lo
+que se le pidió) y por eso no se trata como un cuarto caso.
 
 ### §8.5. Configuración por integración: dos niveles
 

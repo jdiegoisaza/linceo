@@ -53,7 +53,7 @@ from pathlib import Path
 
 from linceo.core.context import ContextResolutionError, ExecutionContext, Platform
 from linceo.core.ports import FetchedPolicy
-from linceo.core.remote_policy import RemotePolicyFetchError
+from linceo.core.remote_policy import DEFAULT_TOKEN_ENV_VAR, RemotePolicyFetchError
 from linceo.core.secret import Secret, SecretRedactingFilter
 from linceo.providers.environment import process_environment
 
@@ -229,6 +229,24 @@ class AzureDevOpsContextProvider:
 _ENV_COLLECTION_URI = "SYSTEM_COLLECTIONURI"
 _ENV_TEAM_PROJECT = "SYSTEM_TEAMPROJECT"
 
+#: Every environment variable `AzureDevOpsPolicySource` reads, gathered in
+#: one place — mirrors `ENV_VARS` above, but for the *policy source* port
+#: rather than the *context* one: the exact allowlist a container
+#: invocation must forward (`docker run -e VAR ...`) for a `[remote_policy]`
+#: declaration to resolve at all, distinct from `ENV_VARS` because a run
+#: with no remote policy configured needs none of these. Unlike
+#: `_ENV_COLLECTION_URI`/`_ENV_TEAM_PROJECT`, `DEFAULT_TOKEN_ENV_VAR`
+#: (`SYSTEM_ACCESSTOKEN`) is *not* forwarded into a process environment
+#: automatically by Azure Pipelines the way the other two are — a step must
+#: explicitly map it via its own `env:` block (`$(System.AccessToken)`)
+#: before it exists to be forwarded into the container at all; the
+#: reference `azure-pipelines/templates/linceo-scan.yml` does this by
+#: default (docs/ADOPTION.md, "Fuente remota de la política") — nothing to
+#: configure if you use it. `tests/unit/test_azure_devops_policy_source.py`
+#: cross-checks the template forwards every one of these, the same anti-drift
+#: pattern `tests/unit/test_cli_context.py` already applies to `ENV_VARS`.
+REMOTE_POLICY_ENV_VARS = (_ENV_COLLECTION_URI, _ENV_TEAM_PROJECT, DEFAULT_TOKEN_ENV_VAR)
+
 #: Azure DevOps REST API version this reference implementation targets
 #: (ADR R2, §8.4) — pinned the same way a tool binary version is (ADR R4):
 #: an explicit, reviewed choice, never "whatever the server defaults to".
@@ -261,11 +279,19 @@ class AzureDevOpsPolicySource:
     security team's baseline repository realistically lives in its own
     dedicated Azure DevOps project, not necessarily the one being scanned.
     `token_env` names the environment variable carrying the bearer token
-    (ADR §9: the flag/field names the origin, never the value) — typically
-    `SYSTEM_ACCESSTOKEN`, the pipeline's own OAuth token, available once a
-    pipeline enables "Allow scripts to access the OAuth token"; a classic
-    Personal Access Token also works the same way. `None` when the
-    repository needs no authentication at all.
+    (ADR §9: the flag/field names the origin, never the value), defaulting
+    to `DEFAULT_TOKEN_ENV_VAR` (`SYSTEM_ACCESSTOKEN`) — the running build's
+    own OAuth identity, scoped to the job, requiring no PAT anyone has to
+    create or rotate; the correct credential whenever the policy repository
+    lives in the *same organization* as the build (ADR §8.4,
+    docs/ADOPTION.md). Overridden with a different variable name for a
+    repository outside that scope, in a different organization entirely,
+    which `System.AccessToken` cannot reach regardless of permissions —
+    there, a Personal Access Token named by its own variable is the correct
+    credential instead. Resolving to no value at all in the environment
+    (the variable genuinely absent — this default is harmless even when
+    unset) sends no `Authorization` header, the case of a public or
+    anonymously readable repository.
 
     The resolved token value is held as a `linceo.core.secret.Secret` from
     the moment it is read out of the environment until the single point
@@ -284,7 +310,7 @@ class AzureDevOpsPolicySource:
     repository: str
     path: str
     project: str | None = None
-    token_env: str | None = None
+    token_env: str = DEFAULT_TOKEN_ENV_VAR
 
     def _resolve_organization_and_project(self, env: Mapping[str, str]) -> tuple[str, str]:
         """Resolve `(organization_url, project)` from `env`.
@@ -354,8 +380,11 @@ class AzureDevOpsPolicySource:
             import httpx
         except ImportError as exc:
             msg = (
-                "fetching a remote policy document from Azure DevOps requires the "
-                "'linceo[remote-config]' extra (pip install 'linceo[remote-config]')"
+                "fetching a remote policy document from Azure DevOps requires the 'httpx' "
+                "package (the 'linceo[remote-config]' extra): if you installed linceo with "
+                "pip, run `pip install 'linceo[remote-config]'`; the reference container image "
+                "(ADR §4/R4) already bundles it, so seeing this from inside that image means "
+                "an out-of-date image — pull or rebuild the current one"
             )
             raise RemotePolicyFetchError(msg) from exc
 
@@ -366,7 +395,8 @@ class AzureDevOpsPolicySource:
         url = f"{base}/{project}/_apis/git/repositories/{self.repository}/items"
         params = {"path": self.path, "download": "true", "api-version": _REST_API_VERSION}
         headers: dict[str, str] = {}
-        token = Secret(env[self.token_env]) if self.token_env and env.get(self.token_env) else None
+        raw_token = env.get(self.token_env)
+        token = Secret(raw_token) if raw_token else None
         if token is not None:
             _redact_from_http_client_logs(token)
             headers["Authorization"] = f"Bearer {token.reveal()}"
@@ -375,10 +405,42 @@ class AzureDevOpsPolicySource:
             response = httpx.get(url, params=params, headers=headers, timeout=10.0)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            msg = f"failed to fetch {self.repository}/{self.path} from Azure DevOps: {exc}"
+            hint = _permission_hint(exc, token_env=self.token_env, repository=self.repository)
+            msg = f"failed to fetch {self.repository}/{self.path} from Azure DevOps: {exc}{hint}"
             raise RemotePolicyFetchError(msg) from exc
 
         return FetchedPolicy(content=response.text)
+
+
+def _permission_hint(exc: Exception, *, token_env: str, repository: str) -> str:
+    """The likely-cause hint appended to a 401/403 raised through the build's own identity.
+
+    Deliberately narrow: only for `httpx.HTTPStatusError` with status 401 or
+    403, and only when `token_env` is still `DEFAULT_TOKEN_ENV_VAR` — a
+    custom `token_env` means the operator already chose a specific
+    credential (a Personal Access Token, typically), whose own permissions
+    are that operator's to reason about; naming a "build identity" cause
+    there would be actively misleading. For the default case, though, a 401
+    or 403 has one overwhelmingly likely cause: nobody has yet granted the
+    running build's own identity permission to read the policy repository —
+    a repository-permissions problem this project can name specifically,
+    rather than leaving an operator to guess from a bare HTTP status.
+    """
+    import httpx
+
+    if not isinstance(exc, httpx.HTTPStatusError) or token_env != DEFAULT_TOKEN_ENV_VAR:
+        return ""
+    if exc.response.status_code not in (401, 403):
+        return ""
+    return (
+        f" — the most likely cause: the build identity behind {DEFAULT_TOKEN_ENV_VAR} has no "
+        f"Read permission on {repository!r}. Grant it under Project Settings > Repositories > "
+        f"{repository} > Security, to the '<Project> Build Service (<Organization>)' identity. "
+        "If the policy repository lives in a different project than this build's own, also "
+        "check Organization Settings > Pipelines > Settings > 'Limit job authorization scope', "
+        "which can block cross-project access even once the repository's own permissions are "
+        "correct."
+    )
 
 
 def _redact_from_http_client_logs(token: Secret) -> None:

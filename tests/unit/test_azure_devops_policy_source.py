@@ -13,14 +13,15 @@ import builtins
 import logging
 from collections.abc import Generator, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 import pytest
 
-from linceo.core.remote_policy import RemotePolicyFetchError
-from linceo.providers.azure_devops import AzureDevOpsPolicySource
+from linceo.core.remote_policy import DEFAULT_TOKEN_ENV_VAR, RemotePolicyFetchError
+from linceo.providers.azure_devops import REMOTE_POLICY_ENV_VARS, AzureDevOpsPolicySource
 
-_ENV_VARS = ("SYSTEM_COLLECTIONURI", "SYSTEM_TEAMPROJECT", "MY_TOKEN")
+_ENV_VARS = (*REMOTE_POLICY_ENV_VARS, "MY_TOKEN")
 
 
 @pytest.fixture(autouse=True)
@@ -121,15 +122,58 @@ def test_fetch_prefers_the_declared_project_over_the_builds_own(
     assert "/platform-security/" in url
 
 
-def test_fetch_with_no_token_env_sends_no_authorization_header(
+def test_fetch_with_the_default_token_env_unset_sends_no_authorization_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """`DEFAULT_TOKEN_ENV_VAR` is harmless when the variable is genuinely absent (ADR §9)."""
     monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
     monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
     capturing_get = _CapturingGet()
     monkeypatch.setattr(httpx, "get", capturing_get)
 
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+    assert source.token_env == DEFAULT_TOKEN_ENV_VAR
+    source.fetch()
+
+    [(_url, _params, headers)] = capturing_get.calls
+    assert headers == {}
+
+
+def test_fetch_uses_the_default_token_env_automatically_when_the_build_sets_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The common case task 2 exists for: a same-org repository needs no `token_env` declared.
+
+    `azure-pipelines/templates/linceo-scan.yml` maps `System.AccessToken`
+    into this exact variable by default (docs/ADOPTION.md) — once that
+    mapping exists, `AzureDevOpsPolicySource` picks it up with zero
+    declaration in the scanned repository's own `.devsecops/config.toml`.
+    """
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    monkeypatch.setenv(DEFAULT_TOKEN_ENV_VAR, "build-identity-token")
+    capturing_get = _CapturingGet()
+    monkeypatch.setattr(httpx, "get", capturing_get)
+
     AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml").fetch()
+
+    [(_url, _params, headers)] = capturing_get.calls
+    assert headers == {"Authorization": "Bearer build-identity-token"}
+
+
+def test_an_explicit_empty_token_env_opts_out_of_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    monkeypatch.setenv(DEFAULT_TOKEN_ENV_VAR, "build-identity-token")
+    capturing_get = _CapturingGet()
+    monkeypatch.setattr(httpx, "get", capturing_get)
+
+    source = AzureDevOpsPolicySource(
+        repository="security-baseline", path="policy.toml", token_env=""
+    )
+    source.fetch()
 
     [(_url, _params, headers)] = capturing_get.calls
     assert headers == {}
@@ -172,6 +216,82 @@ def test_fetch_wraps_any_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
         source.fetch()
 
 
+# --- 401/403 permission hint (ADR §8.4, task: identidad del build) -------------
+
+
+def _status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request(
+        "GET", "https://dev.azure.com/acme/platform/_apis/git/repositories/security-baseline/items"
+    )
+    response = httpx.Response(status_code, request=request, text="")
+    return httpx.HTTPStatusError(f"{status_code} error", request=request, response=response)
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_fetch_names_the_permission_hint_for_the_default_token_env(
+    monkeypatch: pytest.MonkeyPatch, status_code: int
+) -> None:
+    """A 401/403 through the build's own identity has one overwhelmingly likely cause."""
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    monkeypatch.setenv(DEFAULT_TOKEN_ENV_VAR, "build-identity-token")
+
+    def _raising_get(*_args: object, **_kwargs: object) -> _FakeResponse:
+        raise _status_error(status_code)
+
+    monkeypatch.setattr(httpx, "get", _raising_get)
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError, match="Read permission") as exc_info:
+        source.fetch()
+
+    assert "Project Settings" in str(exc_info.value)
+    assert "Limit job authorization scope" in str(exc_info.value)
+
+
+def test_fetch_omits_the_permission_hint_for_a_custom_token_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom `token_env` means the operator already chose a credential (typically a PAT) —
+    naming a "build identity" cause there would be actively misleading."""
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+    monkeypatch.setenv("MY_TOKEN", "pat-value")
+
+    def _raising_get(*_args: object, **_kwargs: object) -> _FakeResponse:
+        raise _status_error(401)
+
+    monkeypatch.setattr(httpx, "get", _raising_get)
+    source = AzureDevOpsPolicySource(
+        repository="security-baseline",
+        path="policy.toml",
+        token_env="MY_TOKEN",  # noqa: S106 -- an env var *name*, not a credential value (ADR §9)
+    )
+
+    with pytest.raises(RemotePolicyFetchError) as exc_info:
+        source.fetch()
+
+    assert "build identity" not in str(exc_info.value)
+
+
+def test_fetch_omits_the_permission_hint_for_an_unrelated_status_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+
+    def _raising_get(*_args: object, **_kwargs: object) -> _FakeResponse:
+        raise _status_error(404)
+
+    monkeypatch.setattr(httpx, "get", _raising_get)
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError) as exc_info:
+        source.fetch()
+
+    assert "build identity" not in str(exc_info.value)
+
+
 def test_fetch_without_the_remote_config_extra_installed_is_an_actionable_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -188,8 +308,18 @@ def test_fetch_without_the_remote_config_extra_installed_is_an_actionable_error(
 
     source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
 
-    with pytest.raises(RemotePolicyFetchError, match="remote-config"):
+    with pytest.raises(RemotePolicyFetchError, match="remote-config") as exc_info:
         source.fetch()
+
+    # Neither an operator who `pip install`ed linceo nor one running the
+    # reference container should be left with no actionable next step —
+    # this message names both, since the exception alone cannot tell which
+    # one applies (the review finding this guards: the message used to name
+    # only `pip install`, impossible advice from inside a container with no
+    # writable venv and no expectation anyone shells into it at all).
+    message = str(exc_info.value)
+    assert "pip install 'linceo[remote-config]'" in message
+    assert "container image" in message
 
 
 # --- cache_key: the cross-tenant collision fix (ADR §9) -------------------------
@@ -305,3 +435,39 @@ def test_fetch_installs_a_redaction_filter_that_catches_a_hypothetical_header_lo
     [record] = records
     assert "super-secret-value" not in record.getMessage()
     assert "***" in record.getMessage()
+
+
+# --- the reference pipeline template forwards everything this port reads -------
+
+
+def test_azure_pipelines_template_forwards_every_remote_policy_variable() -> None:
+    """The anti-drift check for `REMOTE_POLICY_ENV_VARS`, mirroring
+    `tests/unit/test_cli_context.py::test_azure_pipelines_template_forwards_every_variable_this_project_reads`
+    for `linceo.providers.azure_devops.ENV_VARS`: a container invocation using the reference
+    template must pass `-e VARNAME` for every variable `AzureDevOpsPolicySource` reads, not a
+    partial or stale copy of the list hand-maintained separately in the YAML/bash template.
+    """
+    template_path = (
+        Path(__file__).resolve().parents[2] / "azure-pipelines" / "templates" / "linceo-scan.yml"
+    )
+    script = template_path.read_text(encoding="utf-8")
+
+    missing = [var for var in REMOTE_POLICY_ENV_VARS if f"-e {var}" not in script]
+    assert not missing, (
+        f"{missing} not forwarded with `-e` in azure-pipelines/templates/linceo-scan.yml — a "
+        "container invocation using this template would silently lose them."
+    )
+
+
+def test_azure_pipelines_template_maps_system_access_token_via_its_own_env_block() -> None:
+    """`System.AccessToken`, unlike every other predefined variable this project reads, is not
+    forwarded into a step's own process environment automatically — Azure Pipelines requires an
+    explicit `env:` mapping (`$(System.AccessToken)`) before `-e SYSTEM_ACCESSTOKEN` on the
+    `docker run` line has anything real to forward at all.
+    """
+    template_path = (
+        Path(__file__).resolve().parents[2] / "azure-pipelines" / "templates" / "linceo-scan.yml"
+    )
+    script = template_path.read_text(encoding="utf-8")
+
+    assert f"{DEFAULT_TOKEN_ENV_VAR}: $(System.AccessToken)" in script

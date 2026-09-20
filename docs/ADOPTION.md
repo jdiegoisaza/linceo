@@ -449,3 +449,152 @@ variable relevante, antes de correr ninguna herramienta. Si alguna vez una
 organización invoca la imagen directamente en un paso propio, sin pasar por
 esta plantilla, `linceo context` es la forma más rápida de confirmar si el
 problema es exactamente este.
+
+## Fuente remota de la política
+
+Cuando el repositorio escaneado declara `[remote_policy]` en su propio
+`.devsecops/config.toml` (ADR R2, §8.4), los umbrales y la configuración de
+herramientas dejan de decidirse solo con ese archivo local: se descargan de
+un repositorio de política que seguridad mantiene aparte, y este mismo
+repositorio hereda cualquier cambio ahí en su siguiente run, sin tocar
+nada. Hay exactamente dos formas de autenticar esa descarga, y cuál usar
+depende de una sola pregunta: **¿el repositorio de política vive en la
+misma organización de Azure DevOps que el repositorio que se está
+escaneando, o en otra?**
+
+### Modo 1 — identidad del build, misma organización (el caso común)
+
+Nada que declarar más allá del nombre del repositorio:
+
+```toml
+# .devsecops/config.toml, en el repositorio escaneado
+[remote_policy]
+repository = "security-baseline"
+```
+
+`token_env` tiene por defecto `SYSTEM_ACCESSTOKEN` — la identidad OAuth de
+la propia ejecución del build, con vida limitada al job, que no exige que
+nadie cree ni rote un PAT. La plantilla reutilizable
+(`azure-pipelines/templates/linceo-scan.yml`) ya mapea
+`$(System.AccessToken)` a esa variable y la reenvía al contenedor por
+defecto — un pipeline que use la plantilla no necesita saber que esto
+existe. Esta identidad solo puede leer repositorios de la **misma
+organización** (y, según el permiso concedido, del mismo proyecto o de
+otro); nunca cruza a una organización distinta, sin importar qué permisos
+se le concedan ahí.
+
+**Lo único que sí requiere una acción manual, una sola vez:** conceder
+permiso de lectura sobre el repositorio de política a la identidad del
+build. En Azure DevOps: *Project Settings → Repositories → (repositorio de
+política) → Security*, y ahí buscar la identidad
+`<Proyecto> Build Service (<Organización>)` — concederle **Read** alcanza,
+no hace falta **Contribute**. Si el repositorio de política vive en un
+proyecto distinto del que se escanea (el caso realista de un proyecto
+dedicado a seguridad/plataforma), declarar ese proyecto explícitamente:
+
+```toml
+[remote_policy]
+repository = "security-baseline"
+project = "platform-security"
+```
+
+y revisar además *Organization Settings → Pipelines → Settings → Limit job
+authorization scope*: con ese límite activado por proyecto, la identidad
+del build puede no alcanzar recursos de otro proyecto aunque el
+repositorio ya le conceda permiso de lectura.
+
+**Si la descarga falla con 401 o 403 usando este modo**, el mensaje de
+error nombra esta causa explícitamente — "the build identity behind
+SYSTEM_ACCESSTOKEN has no Read permission on..." — y dónde concederlo,
+para no dejar a quien lo lee adivinando desde un código HTTP desnudo.
+
+### Modo 2 — Personal Access Token, fuera de esa organización
+
+`System.AccessToken` no puede alcanzar una organización distinta de la que
+ejecuta el build, sin importar qué permisos se configuren del otro lado —
+es una limitación de la propia identidad OAuth, no de este proyecto. Para
+un repositorio de política en otra organización, la credencial correcta es
+un Personal Access Token (PAT) con permiso de lectura sobre ese
+repositorio, guardado como variable secreta del pipeline (nunca como texto
+plano en ningún archivo del repositorio, ADR R5/§9).
+
+Tres pasos:
+
+1. Crear el PAT en la organización *de destino* (donde vive el repositorio
+   de política), con el alcance mínimo — `Code (Read)` — y guardarlo como
+   variable secreta del pipeline (o en un `variable group` / Azure Key
+   Vault vinculado), nunca como texto plano en el YAML.
+2. Declarar, en el repositorio *escaneado*, qué variable de entorno llevará
+   ese token:
+
+   ```toml
+   [remote_policy]
+   repository = "security-baseline"
+   token_env = "LINCEO_POLICY_TOKEN"
+   ```
+
+3. Pasar esa variable secreta a la plantilla, vía el parámetro
+   `policyRepoToken` — una referencia a la variable, nunca su valor
+   (ADR §9):
+
+   ```yaml
+   steps:
+     - template: ../templates/linceo-scan.yml
+       parameters:
+         category: secrets
+         imageRepository: contoso.azurecr.io/linceo
+         imageTag: '0.3.0'
+         policyRepoToken: $(MyOrgSecurityBaselinePat)
+   ```
+
+`LINCEO_POLICY_TOKEN` es el nombre fijo que la plantilla reenvía al
+contenedor cuando se usa `policyRepoToken` — no es necesario, ni está
+soportado, elegir un nombre distinto sin modificar la propia plantilla.
+
+**Si la descarga falla con 401 o 403 usando este modo**, el mensaje de
+error no atribuye la causa a la identidad del build — un `token_env`
+distinto del valor por defecto significa que el operador ya eligió una
+credencial concreta, y solo quien la generó puede saber si expiró, si le
+falta el alcance `Code (Read)`, o si el PAT es del todo el correcto para
+ese repositorio.
+
+### Ninguno de los dos modos afecta las exclusiones del propio equipo
+
+Ambos modos gobiernan exactamente lo mismo — `[thresholds]`/`[tool_defaults]`/`[tools.<nombre>]`
+del documento remoto — y nunca las secciones `[[exclusions]]` /
+`[[skipped_tools]]`, que siempre se declaran en el `.devsecops/config.toml`
+*local* del repositorio escaneado, sin importar cuál de los dos modos de
+autenticación esté en uso (ADR §8.4: "un equipo no debería necesitar un
+pull request al repositorio de seguridad para suprimir su propio falso
+positivo").
+
+### La caché local no sobrevive un `docker run` efímero
+
+La imagen de referencia ya trae instalado lo necesario para descargar la
+política (`[remote-config]`, horneado en la imagen desde la corrección
+descrita en el ADR, "Enmienda... la imagen de referencia instala
+`[remote-config]`"), y cada run intenta refrescar siempre, sin ninguna
+ventana de caducidad que lo retrase. Lo que la imagen *no* resuelve por sí
+sola es dónde vive la copia de respaldo: por defecto, bajo `$HOME` dentro
+del propio contenedor — un filesystem que un `docker run --rm` (el patrón
+que la plantilla de referencia usa, y el más común en cualquier pipeline de
+CI) descarta por completo al terminar el paso.
+
+En ese patrón habitual, una descarga fallida **nunca** encuentra una copia
+en caché que usar como respaldo, sin importar cuántas veces la descarga
+haya funcionado en runs anteriores — cada `docker run` empieza con una
+caché vacía, así que el estado `cached` de `PolicySourceStatus` (ADR §8.4)
+simplemente no ocurre bajo este patrón de despliegue; una falla de red
+degrada directo a `unavailable` (solo el documento local), nunca a "la
+última copia buena conocida". Esto no es un defecto — es la consecuencia
+esperada de que el contenedor sea efímero, y degradar a `unavailable` en
+vez de fallar el run sigue siendo exactamente lo correcto (ADR §5).
+
+**Si se quiere que la caché sobreviva entre runs** — para que una falla de
+red puntual siga teniendo una copia reciente de la que degradar, en vez de
+caer directo a "solo lo local" — `$LINCEO_POLICY_CACHE_DIR` debe apuntar a
+un directorio montado desde un volumen que persista entre invocaciones del
+contenedor (un caché de agente self-hosted, por ejemplo), no al filesystem
+efímero por defecto. La plantilla de referencia no monta ninguno por
+defecto — hacerlo es una decisión de infraestructura de quien opera el
+pipeline, fuera del alcance de esta plantilla genérica.

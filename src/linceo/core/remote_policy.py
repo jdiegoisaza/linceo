@@ -85,6 +85,21 @@ from linceo.core.ports import PolicySource
 #: `remote_policy.path`'s value when a declaration does not set one.
 DEFAULT_REMOTE_POLICY_PATH = "policy.toml"
 
+#: `remote_policy.token_env`'s value when a declaration does not set one
+#: (ADR §9): Azure Pipelines' own predefined variable for the running
+#: build's own OAuth identity — read-scoped to the build, expiring with the
+#: job, requiring no PAT anyone has to create or rotate by hand. This is
+#: the *name* only (ADR §9: never a value) and this project's one
+#: reference platform's own convention, not platform-detection logic (ADR
+#: R1 forbids the latter, never the former) — the same degree of
+#: Azure-DevOps-specific vocabulary `RemotePolicyDeclaration.project`'s own
+#: docstring already uses. Harmless as a default even when the source
+#: needs no authentication at all, or is not really running under Azure
+#: Pipelines: `AzureDevOpsPolicySource.fetch` sends no `Authorization`
+#: header at all when this variable is simply absent from the environment,
+#: exactly as if `token_env` had been left with no value.
+DEFAULT_TOKEN_ENV_VAR = "SYSTEM_ACCESSTOKEN"  # noqa: S105 -- an env var *name*, not a credential
+
 _DECLARATION_KNOWN_FIELDS = frozenset({"repository", "path", "project", "token_env"})
 
 #: The only top-level keys a remote policy document may declare at all
@@ -119,15 +134,22 @@ class RemotePolicyDeclaration:
     DevOps project as everything else — but is overridable for the very
     real case where it lives in a dedicated security/platform project of
     its own instead. `token_env` names the environment variable carrying
-    the auth token (ADR §9: never the token's value itself); `None` when
-    the source needs no authentication at all (a public or anonymously
-    readable repository).
+    the auth token (ADR §9: never the token's value itself), defaulting to
+    `DEFAULT_TOKEN_ENV_VAR` — the common case, a policy repository in the
+    *same organization*, needs no `token_env` line at all: the build's own
+    identity already has this by name the moment
+    `azure-pipelines/templates/linceo-scan.yml` forwards it, which it now
+    always does. Set explicitly only for a repository outside that
+    scope — a different organization, which `System.AccessToken` cannot
+    reach at all — where a Personal Access Token, named by its own
+    variable, is the correct credential instead (docs/ADOPTION.md,
+    "Fuente remota de la política").
     """
 
     repository: str
     path: str = DEFAULT_REMOTE_POLICY_PATH
     project: str | None = None
-    token_env: str | None = None
+    token_env: str = DEFAULT_TOKEN_ENV_VAR
 
 
 def parse_remote_policy_declaration(
@@ -172,8 +194,8 @@ def parse_remote_policy_declaration(
         msg = "remote_policy.project must be a string"
         raise PolicyConfigurationError(msg)
 
-    token_env = raw.get("token_env")
-    if token_env is not None and not isinstance(token_env, str):
+    token_env = raw.get("token_env", DEFAULT_TOKEN_ENV_VAR)
+    if not isinstance(token_env, str):
         msg = "remote_policy.token_env must be a string"
         raise PolicyConfigurationError(msg)
 

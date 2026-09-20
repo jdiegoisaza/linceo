@@ -12,6 +12,7 @@ import pytest
 from linceo.core.policy import DEFAULT_MAX_POLICY_CACHE_AGE_DAYS, PolicyConfigurationError
 from linceo.core.ports import FetchedPolicy
 from linceo.core.remote_policy import (
+    DEFAULT_TOKEN_ENV_VAR,
     PolicySourceState,
     RemotePolicyDeclaration,
     RemotePolicyFetchError,
@@ -36,6 +37,7 @@ def test_no_remote_policy_table_is_none() -> None:
 
 
 def test_a_minimal_declaration_defaults_path_project_and_token_env() -> None:
+    """The common case (ADR §8.4): a same-organization repository needs no `token_env` line."""
     declaration = parse_remote_policy_declaration(
         {"remote_policy": {"repository": "security-baseline"}}
     )
@@ -44,7 +46,17 @@ def test_a_minimal_declaration_defaults_path_project_and_token_env() -> None:
     assert declaration is not None
     assert declaration.path == "policy.toml"
     assert declaration.project is None
-    assert declaration.token_env is None
+    assert declaration.token_env == DEFAULT_TOKEN_ENV_VAR
+
+
+def test_an_explicit_empty_token_env_opts_out_of_the_default() -> None:
+    """An explicit `token_env = ""` never resolves to any real environment variable."""
+    declaration = parse_remote_policy_declaration(
+        {"remote_policy": {"repository": "security-baseline", "token_env": ""}}
+    )
+
+    assert declaration is not None
+    assert declaration.token_env == ""
 
 
 def test_a_full_declaration_parses_every_field() -> None:
