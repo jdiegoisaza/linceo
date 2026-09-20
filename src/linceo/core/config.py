@@ -28,10 +28,11 @@ chain, but interact differently:
   When that happens, `ThresholdResolution.superseded` and
   `superseded_category_thresholds` record what was replaced, so a report
   can say so explicitly (ADR §8.1).
-- **Exclusions, tool skips, and per-tool configuration** are file-only for
-  now (ADR §8, §8.2, §8.5): there is no CLI or environment-variable
-  equivalent, only the policy document's `[[exclusions]]`,
-  `[[skipped_tools]]`, and `[tools.<name>]` sections.
+- **Exclusions, tool skips, severity overrides, and per-tool configuration**
+  are file-only for now (ADR §6, §8, §8.2, §8.5): there is no CLI or
+  environment-variable equivalent, only the policy document's
+  `[[exclusions]]`, `[[skipped_tools]]`, `[[severity_overrides]]`, and
+  `[tools.<name>]` sections.
 """
 
 from __future__ import annotations
@@ -103,6 +104,7 @@ _FILE_TOP_LEVEL_KNOWN_KEYS = frozenset(
         "thresholds",
         "exclusions",
         "skipped_tools",
+        "severity_overrides",
         "tool_defaults",
         "tools",
         "remote_policy",
@@ -138,9 +140,10 @@ class Config:
     the single source of truth the gate evaluates against
     (`linceo.core.gate.evaluate_gate`), whether it came from a plain
     `--fail-on` cutoff or a policy file's `[thresholds]` table (ADR §8.1).
-    `policy` carries this run's exclusions and temporary tool skips (ADR
-    §8.2) — the same file, the same precedence chain, but file-only for
-    now, with no CLI or environment-variable equivalent. `tool_defaults`
+    `policy` carries this run's exclusions, temporary tool skips, and
+    severity overrides (ADR §8.2, §6) — the same file, the same precedence
+    chain, but file-only for now, with no CLI or environment-variable
+    equivalent. `tool_defaults`
     and `tool_configs` are the two places level 1 per-integration
     configuration can come from (ADR §8.5): `tool_defaults` is the single
     `[tool_defaults]` table, applied to every integration in the run;
@@ -158,9 +161,10 @@ class Config:
     `None` for the vast majority of runs (no `[remote_policy]` declared at
     all) and otherwise names exactly where that remote-governed content
     came from this run: fetched fresh, a cached fallback, or unavailable
-    (local-only). `policy` (exclusions, tool skips) is never affected by
-    this either way — those two sections are local-only by design (ADR
-    §8.4) and are not part of what a remote source can govern.
+    (local-only). `policy` (exclusions, tool skips, severity overrides) is
+    never affected by this either way — all three sections are local-only
+    by design (ADR §8.4, §6) and are not part of what a remote source can
+    govern.
 
     Every field defaults to the permissive, reporting-only choice the ADR
     documents: no gate configured (§8.1), `continue_on_tool_error = False`
@@ -614,7 +618,11 @@ def load_config(
         strict_normalization=strict_normalization,
         max_expiry_horizon_days=max_expiry_horizon_days,
         report_max_rows=report_max_rows,
-        policy=Policy(exclusions=policy_document.exclusions, tool_skips=policy_document.tool_skips),
+        policy=Policy(
+            exclusions=policy_document.exclusions,
+            tool_skips=policy_document.tool_skips,
+            severity_overrides=policy_document.severity_overrides,
+        ),
         tool_defaults=tool_defaults,
         tool_configs=tool_configs,
         policy_source=policy_source,

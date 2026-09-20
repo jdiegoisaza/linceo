@@ -10,7 +10,13 @@ from linceo.core.context import ExecutionContext, Platform
 from linceo.core.execution import ExecutionStatus, ToolExecution
 from linceo.core.findings import Category, Finding, Location
 from linceo.core.gate import evaluate_gate
-from linceo.core.policy import ConfigLayer, Exclusion, ThresholdResolution, ToolSkip
+from linceo.core.policy import (
+    ConfigLayer,
+    Exclusion,
+    SeverityOverride,
+    ThresholdResolution,
+    ToolSkip,
+)
 from linceo.core.remote_policy import PolicySourceState, PolicySourceStatus
 from linceo.core.report_schema import Column, ReportSchema, Truncate
 from linceo.core.reporters import render_console, render_json
@@ -445,6 +451,51 @@ def test_expired_tool_skip_is_surfaced_too() -> None:
     report = _render(result)
 
     assert "Expired tool skips, now running again (1)" in report
+
+
+# --- severity overrides (ADR §6, §8.4) --------------------------------------
+
+
+def test_severity_override_count_is_always_shown_even_when_zero() -> None:
+    result = _result(fail_on=None, findings=())
+
+    report = _render(result)
+
+    assert "Severity overrides applied: 0" in report
+
+
+def test_applied_severity_override_is_listed() -> None:
+    override = SeverityOverride(
+        tool="gitleaks",
+        rule_id="generic-api-key",
+        severity=Severity.MEDIUM,
+        reason="noisy in our fixtures",
+        owner="team-atlas",
+        expires_at=date(2026, 10, 1),
+    )
+    result = replace(_result(fail_on=None, findings=()), applied_severity_overrides=(override,))
+
+    report = _render(result)
+
+    assert "Severity overrides applied: 1" in report
+    assert "gitleaks/generic-api-key -> medium owner=team-atlas until=2026-10-01" in report
+
+
+def test_expired_severity_override_is_surfaced_too() -> None:
+    override = SeverityOverride(
+        tool="gitleaks",
+        rule_id="generic-api-key",
+        severity=Severity.MEDIUM,
+        reason="noisy in our fixtures",
+        owner="team-atlas",
+        expires_at=date(2026, 1, 1),
+    )
+    result = replace(_result(fail_on=None, findings=()), expired_severity_overrides=(override,))
+
+    report = _render(result)
+
+    assert "Expired severity overrides, no longer applied (1)" in report
+    assert "gitleaks/generic-api-key -> medium owner=team-atlas was_until=2026-01-01" in report
 
 
 # --- remote policy source (ADR R2, §8.4) ----------------------------------------

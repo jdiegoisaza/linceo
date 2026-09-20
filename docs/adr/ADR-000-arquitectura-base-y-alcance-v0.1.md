@@ -735,10 +735,29 @@ disponible primero":
 1. **Override del cliente.** Decisión humana explícita sobre un `(herramienta,
    rule_id)` concreto; gana siempre sobre cualquier señal automática. Vive en la
    configuración de cliente (R5), nunca en este repositorio — modelado en código
-   desde el primer `SeverityNormalizer` (`overrides`), pero sin todavía un camino
-   real desde `.devsecops/config.toml` hasta ese campo; aplazado explícitamente
-   en §14, junto con la pregunta más amplia de si `severity_map.toml` completo
-   debería poder extenderse o sobrescribirse desde ese mismo documento.
+   desde el primer `SeverityNormalizer` (`overrides`).
+
+   **Enmienda (2026-09-20): camino cerrado desde `.devsecops/config.toml` (§8.4).**
+   `[[severity_overrides]]` — mismos campos obligatorios que una exclusión
+   (`tool`, `rule_id`, `severity`, `reason`, `owner`, `expires_at`, más
+   `repositories` opcional) — es hoy la fuente real de `SeverityNormalizer.overrides`,
+   resuelta en `linceo.core.engine.run` por repositorio y vigencia
+   (`linceo.core.policy.resolve_severity_overrides`), exactamente como
+   `apply_exclusions` ya resolvía las exclusiones. La decisión de diseño real no
+   era el esquema sino el gobierno: un override que *baja* la severidad de un
+   hallazgo es, en la práctica, la misma vía de escape del gate que una
+   exclusión — así que se le exige la misma disciplina de auditoría
+   (`reason`/`owner`/`expires_at` obligatorios, nunca silencioso ni eterno) y se
+   le aplica la misma frontera de gobierno: es **local únicamente**, igual que
+   `[[exclusions]]`/`[[skipped_tools]]` — un documento remoto que lo declare es
+   error de configuración explícito
+   (`linceo.core.remote_policy._REMOTE_LOCAL_ONLY_KEYS`), nunca una clave que
+   seguridad pueda gobernar centralmente. Esto es distinto, deliberadamente, de
+   la pregunta más amplia de si `severity_map.toml` completo debería poder
+   extenderse o sobrescribirse desde un documento de política — esa pregunta
+   sigue aplazada en §14 sin cambios: sería una política permanente y sin
+   auditoría por hallazgo, del mismo tipo que `[thresholds]`/`[tool_defaults]`,
+   no la vía de excepción local que este override resuelve.
 2. **Severidad nativa de la herramienta**, si existe y no es `UNKNOWN`. Se prefiere
    sobre CVSS porque suele codificar contexto de advisory específico del proveedor
    —severidad ajustada por distro, backports de parches ya aplicados aguas arriba—
@@ -1564,10 +1583,14 @@ copiar nada.
 **Separación por gobierno, no por mecanismo de archivo.** El documento remoto
 declara únicamente lo que seguridad decide centralmente y cambia pocas veces
 al año — `fail_on`, `[thresholds]`/`[thresholds.<categoría>]`, y
-`[tool_defaults]`/`[tools.<nombre>]` —; nunca `[[exclusions]]` ni
-`[[skipped_tools]]`, que cada equipo declara en su propio
-`.devsecops/config.toml` y cambia cada semana. Si el documento remoto declara
-cualquiera de estas dos últimas secciones, es **error de configuración**, no
+`[tool_defaults]`/`[tools.<nombre>]` —; nunca `[[exclusions]]`,
+`[[skipped_tools]]`, ni `[[severity_overrides]]` (§6, cerrado el
+2026-09-20), que cada equipo declara en su propio `.devsecops/config.toml` y
+cambia cada semana — `severity_overrides` se sumó a este lado de la frontera,
+no al de `[thresholds]`/`[tool_defaults]`, precisamente porque exige el mismo
+`reason`/`owner`/`expires_at` obligatorio que una exclusión: es una excepción
+puntual y caducable, no una política permanente. Si el documento remoto
+declara cualquiera de estas tres secciones, es **error de configuración**, no
 un aviso silenciosamente ignorado: un documento remoto que las declarara sería
 un error de quien lo escribió (seguridad, gobernando algo que no le
 corresponde gobernar centralmente), y este proyecto ya trata sistemáticamente
@@ -1575,8 +1598,9 @@ cualquier campo mal ubicado como error explícito con mensaje específico (el
 precedente exacto es el aviso de `[tool_defaults]`/`[tools.<nombre>]` que
 `_validate_top_level_keys` ya daba para `exclude_paths` en la raíz del
 documento, §8.5 abajo) — nunca como una degradación silenciosa que dejaría a
-todo pipeline consumidor con una supresión que ningún equipo local pidió. La
-misma regla rechaza cualquier otra clave fuera de ese conjunto gobernado
+todo pipeline consumidor con una supresión (o una reclasificación de
+severidad) que ningún equipo local pidió. La misma regla rechaza cualquier
+otra clave fuera de ese conjunto gobernado
 (`linceo.core.remote_policy.validate_remote_document`), así el documento
 remoto nunca se convierte, sin que nadie lo decida explícitamente, en el
 lugar donde también viven `continue_on_tool_error` o el horizonte de
@@ -2592,4 +2616,4 @@ cueste, en la práctica, un único `docker run` sin instalación previa de nada.
 | Proveedores de contexto para GitHub Actions y GitLab CI (§1, §10) | Demanda concreta de un usuario en esa plataforma; el contrato ya está validado con dos proveedores de máxima distancia, así que el trabajo restante es de adaptador, no de diseño. |
 | Escaneo de imágenes de contenedor en la integración de Trivy (§10) | Que el caso de uso offline-first quede suficientemente probado en producción como para justificar introducir el primer camino con credenciales de red del proyecto. |
 | Obtención remota del documento de política (§8.4) | Un usuario real con más de un repositorio necesitando compartir el mismo documento sin copiarlo a mano — el esquema ya está diseñado para que esta pieza sea plomería, no rediseño. |
-| Sobrescribir o extender `severity_map.toml` (mapa nativo, defaults por categoría/regla) desde el documento de política del cliente (§6, §8.4) — distinto de `SeverityNormalizer.overrides` (tier 1, por `(herramienta, rule_id)`), que ya existe en el modelo pero tampoco tiene todavía un camino desde `.devsecops/config.toml` hasta él | Un usuario real necesitando ajustar la severidad de un valor nativo o de una regla concreta sin esperar un release de linceo que actualice el fichero empaquetado. |
+| Sobrescribir o extender `severity_map.toml` (mapa nativo, defaults por categoría/regla) desde el documento de política del cliente (§6, §8.4) — distinto de `[[severity_overrides]]` (tier 1, por `(herramienta, rule_id)`, local y auditado por entrada, cerrado el 2026-09-20) | Un usuario real necesitando ajustar la severidad de un valor nativo o de una regla concreta sin esperar un release de linceo que actualice el fichero empaquetado. |

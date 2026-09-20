@@ -10,21 +10,28 @@ unchanged) — its own job is entirely upstream of that, and entirely about
 - **Governance boundary** (ADR §8.4's design note, made concrete). A remote
   document may declare only what security centrally owns and changes a few
   times a year — `fail_on`/`[thresholds]`/`[thresholds.<category>]` and
-  `[tool_defaults]`/`[tools.<name>]` — never `[[exclusions]]` or
-  `[[skipped_tools]]`, which a team owns locally and changes every week.
-  Declaring either in a remote document is a configuration error
+  `[tool_defaults]`/`[tools.<name>]` — never `[[exclusions]]`,
+  `[[skipped_tools]]`, or `[[severity_overrides]]`, each of which a team
+  owns locally and changes every week (`severity_overrides` joined this
+  set for exactly the same reason as `exclusions`: ADR §6 models a
+  severity override with the same mandatory `reason`/`owner`/`expires_at`
+  audit trail as an exclusion, since lowering a finding's severity is
+  functionally the same gate escape hatch as suppressing it outright — see
+  `linceo.core.policy.SeverityOverride`'s own docstring). Declaring any of
+  the three in a remote document is a configuration error
   (`validate_remote_document`), not a warning: it is a mistake in a document
   security itself authored, and failing loudly at the point that document is
   actually consumed is far cheaper than letting every downstream pipeline
-  silently apply a suppression nobody local to that repository ever agreed
-  to. The same reasoning already governs every other misplaced field in this
-  project (`linceo.core.config._validate_top_level_keys`'s
+  silently apply a suppression (or a reclassification) nobody local to that
+  repository ever agreed to. The same reasoning already governs every other
+  misplaced field in this project (`linceo.core.config._validate_top_level_keys`'s
   `[tool_defaults]`/`[tools.<name>]` hint is the closest precedent) — this is
   that same idiom, not a new one.
 - **Merge.** `merge_remote_into_local` overlays exactly the governed keys the
   remote document actually declares onto the local document, leaving
-  everything else — `[[exclusions]]`, `[[skipped_tools]]`, every scalar,
-  `[remote_policy]` itself — untouched. A governed key the remote document
+  everything else — `[[exclusions]]`, `[[skipped_tools]]`,
+  `[[severity_overrides]]`, every scalar, `[remote_policy]` itself —
+  untouched. A governed key the remote document
   does not mention falls back to the local file's own declaration, the same
   "a layer that doesn't mention a field never hides a lower layer's value"
   rule ADR §5/R5 already applies to CLI/env/file scalars and to
@@ -114,8 +121,11 @@ _REMOTE_ALLOWED_TOP_LEVEL_KEYS = frozenset({"version"}) | _REMOTE_GOVERNED_KEYS
 #: governance boundary) — checked, and named specifically in the resulting
 #: error, before the generic "outside its governance surface" check below,
 #: so the message a security engineer sees for this specific mistake
-#: explains *why*, not just *that* it is rejected.
-_REMOTE_LOCAL_ONLY_KEYS = frozenset({"exclusions", "skipped_tools"})
+#: explains *why*, not just *that* it is rejected. `severity_overrides`
+#: (ADR §6) joined `exclusions`/`skipped_tools` here once it gained the
+#: same mandatory audit trail those two already required — see
+#: `linceo.core.policy.SeverityOverride`.
+_REMOTE_LOCAL_ONLY_KEYS = frozenset({"exclusions", "skipped_tools", "severity_overrides"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,21 +218,22 @@ def validate_remote_document(document: Mapping[str, object]) -> None:
     """Reject a remote document that oversteps its governance boundary (ADR §8.4).
 
     Raises:
-        PolicyConfigurationError: if `document` declares `exclusions` or
-            `skipped_tools` (local-only, named specifically — see the
-            module docstring for why this is an error rather than a
-            silently-ignored warning), or any other key outside
-            `_REMOTE_ALLOWED_TOP_LEVEL_KEYS`.
+        PolicyConfigurationError: if `document` declares `exclusions`,
+            `skipped_tools`, or `severity_overrides` (local-only, named
+            specifically — see the module docstring for why this is an
+            error rather than a silently-ignored warning), or any other
+            key outside `_REMOTE_ALLOWED_TOP_LEVEL_KEYS`.
     """
     local_only = set(document) & _REMOTE_LOCAL_ONLY_KEYS
     if local_only:
         msg = (
-            f"remote policy document declares {sorted(local_only)} — exclusions and tool skips "
-            "are local-only by governance design (ADR R2, §8.4): security owns thresholds and "
-            "tool configuration and changes them a few times a year; each scanned repository "
-            "owns its own exclusions and tool skips in its own .devsecops/config.toml and "
-            "changes them every week — a team should never need a pull request to the security "
-            "repository to suppress its own false positive. Remove these from the remote "
+            f"remote policy document declares {sorted(local_only)} — exclusions, tool skips, "
+            "and severity overrides are local-only by governance design (ADR R2, §8.4, §6): "
+            "security owns thresholds and tool configuration and changes them a few times a "
+            "year; each scanned repository owns its own exclusions, tool skips, and severity "
+            "overrides in its own .devsecops/config.toml and changes them every week — a team "
+            "should never need a pull request to the security repository to suppress its own "
+            "false positive or reclassify one finding's severity. Remove these from the remote "
             "document."
         )
         raise PolicyConfigurationError(msg)
@@ -247,10 +258,11 @@ def merge_remote_into_local(
     result, and only the ones `remote_document` actually declares — a
     governed key it is silent on leaves `local_document`'s own value (if
     any) untouched, never cleared. Every other key — `exclusions`,
-    `skipped_tools`, `remote_policy` itself, every scalar — always comes
-    from `local_document` alone: `validate_remote_document` already
-    guarantees `remote_document` never carries the first two, and this
-    function does not even look at the rest.
+    `skipped_tools`, `severity_overrides`, `remote_policy` itself, every
+    scalar — always comes from `local_document` alone:
+    `validate_remote_document` already guarantees `remote_document` never
+    carries the first three, and this function does not even look at the
+    rest.
 
     Callers pass the merged mapping to `linceo.core.policy.parse_policy_document`,
     `linceo.core.tool_config.parse_tool_defaults`, and `parse_tool_configs`

@@ -558,15 +558,17 @@ credencial concreta, y solo quien la generó puede saber si expiró, si le
 falta el alcance `Code (Read)`, o si el PAT es del todo el correcto para
 ese repositorio.
 
-### Ninguno de los dos modos afecta las exclusiones del propio equipo
+### Ninguno de los dos modos afecta las exclusiones ni los overrides de severidad del propio equipo
 
 Ambos modos gobiernan exactamente lo mismo — `[thresholds]`/`[tool_defaults]`/`[tools.<nombre>]`
-del documento remoto — y nunca las secciones `[[exclusions]]` /
-`[[skipped_tools]]`, que siempre se declaran en el `.devsecops/config.toml`
-*local* del repositorio escaneado, sin importar cuál de los dos modos de
-autenticación esté en uso (ADR §8.4: "un equipo no debería necesitar un
-pull request al repositorio de seguridad para suprimir su propio falso
-positivo").
+del documento remoto — y nunca las secciones `[[exclusions]]`,
+`[[skipped_tools]]`, ni `[[severity_overrides]]` (ADR §6), que siempre se
+declaran en el `.devsecops/config.toml` *local* del repositorio escaneado,
+sin importar cuál de los dos modos de autenticación esté en uso (ADR §8.4:
+"un equipo no debería necesitar un pull request al repositorio de seguridad
+para suprimir su propio falso positivo" — la misma razón por la que bajar la
+severidad de un hallazgo tampoco puede vivir en el documento remoto: es la
+misma clase de excepción puntual y auditada, no una política central).
 
 ### La caché local, y por qué la plantilla monta un volumen para ella
 

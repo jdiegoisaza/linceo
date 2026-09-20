@@ -21,7 +21,12 @@ from linceo.core.execution import DataSource, ExecutionStatus, ToolExecution, To
 from linceo.core.findings import Category, Finding
 from linceo.core.gate import evaluate_gate
 from linceo.core.normalization import SeverityNormalizer, normalize_finding
-from linceo.core.policy import ToolSkip, apply_exclusions, split_tool_skips
+from linceo.core.policy import (
+    ToolSkip,
+    apply_exclusions,
+    resolve_severity_overrides,
+    split_tool_skips,
+)
 from linceo.core.ports import ContextProvider, ToolExecutor, ToolIntegration
 from linceo.core.results import RunResult, RunStatus
 from linceo.core.tool_config import ToolConfig, resolve_tool_config
@@ -185,9 +190,15 @@ def run(
 
     `now` is supplied by the caller rather than read from the system clock
     here (ADR R3's determinism corollary: no core module calls
-    `datetime.now()` directly) — its date is used both as the exclusion
-    policy's "today" for expiry comparisons and to decide which of
-    `config.policy.tool_skips` are still active.
+    `datetime.now()` directly) — its date is used as the exclusion policy's
+    "today" for expiry comparisons, to decide which of
+    `config.policy.tool_skips` are still active, and to decide which of
+    `config.policy.severity_overrides` are still active — the latter are
+    resolved (`linceo.core.policy.resolve_severity_overrides`, scoped by
+    `context.repository` and unexpired) *before* any tool runs, since the
+    resulting `(tool, rule_id) -> Severity` mapping replaces `normalizer`'s
+    own `overrides` for this run: every finding is normalized through it,
+    not patched afterward (ADR §6).
 
     Every `ToolIntegration` in `integrations` is either skipped by an
     active `ToolSkip` or run, regardless of whether an earlier one failed —
@@ -212,8 +223,16 @@ def run(
             configuration).
     """
     context = context_provider.resolve()
-    effective_normalizer = replace(normalizer, strict=config.strict_normalization)
     today: date = now.date()
+
+    override_outcome = resolve_severity_overrides(
+        config.policy.severity_overrides, today=today, repository=context.repository
+    )
+    effective_normalizer = replace(
+        normalizer,
+        strict=config.strict_normalization,
+        overrides=override_outcome.overrides,
+    )
 
     active_skips, expired_skips = split_tool_skips(config.policy.tool_skips, today=today)
     skip_by_tool = {skip.tool: skip for skip in active_skips}
@@ -280,8 +299,11 @@ def run(
         status=status,
         severity_map_version=effective_normalizer.map_version,
         suppressed_findings=exclusion_outcome.suppressed,
+        suppressed_by=exclusion_outcome.suppressed_by,
         expired_exclusions=exclusion_outcome.expired,
         applied_tool_skips=applied_tool_skips,
         expired_tool_skips=expired_skips,
+        applied_severity_overrides=override_outcome.active,
+        expired_severity_overrides=override_outcome.expired,
         policy_source=config.policy_source,
     )

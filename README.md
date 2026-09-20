@@ -224,9 +224,9 @@ organization) needs nothing declared here at all; a repository outside
 that organization needs a Personal Access Token instead, via a custom
 `token_env` and the template's own `policyRepoToken` parameter — see
 `docs/ADOPTION.md`, "Fuente remota de la política", for both modes with
-examples. `[[exclusions]]` and `[[skipped_tools]]` stay local-only always;
-a remote document declaring either is a configuration error, not a
-silently-ignored one.
+examples. `[[exclusions]]`, `[[skipped_tools]]`, and `[[severity_overrides]]`
+stay local-only always; a remote document declaring any of the three is a
+configuration error, not a silently-ignored one.
 
 A failed fetch never fails a run: it falls back to the last successfully
 fetched copy (cached under `~/.cache/linceo/remote-policy` by default, or

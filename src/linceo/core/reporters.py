@@ -265,6 +265,34 @@ def _exclusion_summary_lines(result: RunResult) -> list[str]:
     return lines
 
 
+def _severity_override_lines(result: RunResult) -> list[str]:
+    """Active and expired severity overrides — printed unconditionally, even when both are zero.
+
+    Mirrors `_exclusion_summary_lines`'s "never silent" treatment (ADR
+    §8.2, extended to overrides, ADR §6): a local override that lowers a
+    finding's severity is functionally an escape hatch from the gate, so a
+    report that stayed quiet about it would defeat the entire reason this
+    mechanism carries the same audit trail an exclusion does.
+    """
+    lines = [f"Severity overrides applied: {len(result.applied_severity_overrides)}"]
+    lines.extend(
+        f"  - {override.tool}/{override.rule_id} -> {override.severity.value.lower()} "
+        f"owner={override.owner} until={override.expires_at} reason={override.reason!r}"
+        for override in result.applied_severity_overrides
+    )
+    if result.expired_severity_overrides:
+        lines.append(
+            "Expired severity overrides, no longer applied "
+            f"({len(result.expired_severity_overrides)}):"
+        )
+        lines.extend(
+            f"  - {override.tool}/{override.rule_id} -> {override.severity.value.lower()} "
+            f"owner={override.owner} was_until={override.expires_at} reason={override.reason!r}"
+            for override in result.expired_severity_overrides
+        )
+    return lines
+
+
 def _gate_lines(result: RunResult) -> list[str]:
     """The gate verdict, never rendered as `PASSED` when `result.status` is `PARTIAL` (ADR §5)."""
     verdict = result.verdict
@@ -346,6 +374,8 @@ def render_console(
     lines.extend(_policy_skip_lines(result))
     lines.extend(_findings_section(result, schemas=schemas, max_rows=max_rows))
     lines.extend(_exclusion_summary_lines(result))
+    lines.append("")
+    lines.extend(_severity_override_lines(result))
     lines.append("")
     lines.extend(_gate_lines(result))
 

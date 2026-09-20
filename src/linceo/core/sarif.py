@@ -40,10 +40,11 @@ the project's own test suite reach the network (ADR R2).
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from linceo.core.execution import ToolExecution
 from linceo.core.findings import Finding
+from linceo.core.policy import Exclusion
 from linceo.core.results import RunResult
 from linceo.core.severity import Severity
 
@@ -156,7 +157,20 @@ def _properties(finding: Finding) -> dict[str, object] | None:
     }
 
 
-def _result(finding: Finding, *, rule_index: int, suppressed: bool) -> dict[str, object]:
+def _justification(exclusion: Exclusion) -> str:
+    """Render `exclusion` as the plain-text SARIF `suppression.justification` a consumer shows.
+
+    GitHub Code Scanning (and any other SARIF consumer, ADR §7) renders
+    this text verbatim next to a suppressed result — the whole point of
+    filling it at all: a suppression with no `justification` shows *that*
+    a result was suppressed but never *why* or *by whom*, which is exactly
+    what makes a suppression auditable in the first place (ADR §8.2).
+    """
+    expires = exclusion.expires_at.isoformat()
+    return f"{exclusion.reason} (owner: {exclusion.owner}, expires: {expires})"
+
+
+def _result(finding: Finding, *, rule_index: int, exclusion: Exclusion | None) -> dict[str, object]:
     """One `run.results[]` entry for `finding` — the secret itself never among its fields.
 
     Nothing here redacts a secret value: `Finding` (ADR §5, §9) carries no
@@ -176,20 +190,17 @@ def _result(finding: Finding, *, rule_index: int, suppressed: bool) -> dict[str,
     properties = _properties(finding)
     if properties is not None:
         entry["properties"] = properties
-    if suppressed:
+    if exclusion is not None:
         # `kind: "external"`: suppressed by this project's own policy
-        # engine, external to the tool that reported it (ADR §8.2) — no
-        # `justification` text: `RunResult` retains *which* findings are
-        # currently suppressed (`suppressed_findings`) but not which
-        # `Exclusion` suppressed each one (contrast `expired_exclusions`,
-        # which does keep the full `Exclusion`, reason included) — see
-        # `linceo.core.policy.apply_exclusions` — so there is nothing
-        # honest to put in `justification` yet.
-        entry["suppressions"] = [{"kind": "external"}]
+        # engine, external to the tool that reported it (ADR §8.2).
+        # `justification`: the exact `Exclusion` that suppressed this
+        # finding (`RunResult.suppressed_by`, ADR §8.2, §7) — who decided,
+        # why, and until when, not just that a suppression happened.
+        entry["suppressions"] = [{"kind": "external", "justification": _justification(exclusion)}]
     return entry
 
 
-def _run(execution: ToolExecution, *, suppressed_fingerprints: frozenset[str]) -> dict[str, object]:
+def _run(execution: ToolExecution, *, suppressed_by: Mapping[str, Exclusion]) -> dict[str, object]:
     """One `runs[]` entry: `execution`'s own tool, its own rules, its own results.
 
     Built from `execution.findings` — not the run-level,
@@ -204,7 +215,7 @@ def _run(execution: ToolExecution, *, suppressed_fingerprints: frozenset[str]) -
         _result(
             finding,
             rule_index=index_by_rule_id[finding.rule_id],
-            suppressed=finding.fingerprint in suppressed_fingerprints,
+            exclusion=suppressed_by.get(finding.fingerprint),
         )
         for finding in execution.findings
     ]
@@ -229,13 +240,7 @@ def render_sarif(result: RunResult) -> str:
     parameter at all, so there is nothing here that could turn a legibility
     option into a silent loss of evidence.
     """
-    suppressed_fingerprints = frozenset(
-        finding.fingerprint for finding in result.suppressed_findings
-    )
-    runs = [
-        _run(execution, suppressed_fingerprints=suppressed_fingerprints)
-        for execution in result.executions
-    ]
+    runs = [_run(execution, suppressed_by=result.suppressed_by) for execution in result.executions]
     document = {
         "$schema": SARIF_SCHEMA_URI,
         "version": SARIF_VERSION,

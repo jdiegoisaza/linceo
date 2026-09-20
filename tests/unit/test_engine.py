@@ -23,12 +23,19 @@ from linceo.core.exit_codes import (
 from linceo.core.findings import Category, Location, Package, RawFinding
 from linceo.core.fingerprint import secret_fingerprint
 from linceo.core.normalization import SeverityNormalizer
-from linceo.core.policy import ConfigLayer, Exclusion, Policy, ThresholdResolution, ToolSkip
+from linceo.core.policy import (
+    ConfigLayer,
+    Exclusion,
+    Policy,
+    SeverityOverride,
+    ThresholdResolution,
+    ToolSkip,
+)
 from linceo.core.ports import ProcessResult, ToolExecutor
 from linceo.core.remote_policy import PolicySourceState, PolicySourceStatus
 from linceo.core.report_schema import Column, ReportSchema
 from linceo.core.results import RunResult, RunStatus
-from linceo.core.severity import Severity
+from linceo.core.severity import Severity, SeveritySource
 from linceo.core.severity_map import CategorySeverityDefault
 from linceo.core.tool_config import ToolConfig, UnsupportedToolConfigError
 from linceo.testing import FakeContextProvider, FakeToolExecutor
@@ -393,6 +400,93 @@ def test_expired_tool_skip_lets_the_tool_run_again() -> None:
     assert result.executions[0].status is ExecutionStatus.COMPLETED
     assert result.applied_tool_skips == ()
     assert result.expired_tool_skips == (skip,)
+
+
+# --- severity overrides (ADR §6, §8.4) ---------------------------------------
+
+
+def test_severity_override_reclassifies_a_finding_and_can_flip_the_gate() -> None:
+    gitleaks = StaticToolIntegration(
+        name="gitleaks",
+        version="8.18.0",
+        category=Category.SECRETS,
+        argv=("gitleaks", "detect"),
+        raw_findings=(_secret_raw_finding(),),
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+    override = SeverityOverride(
+        tool="gitleaks",
+        rule_id="aws-access-key",
+        severity=Severity.LOW,
+        reason="False positive pattern specific to our test fixtures",
+        owner="team-atlas",
+        expires_at=_NOW.date() + timedelta(days=1),
+    )
+    config = _config_with_fail_on(Severity.HIGH, policy=Policy(severity_overrides=(override,)))
+
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=config)
+
+    [finding] = result.findings
+    assert finding.severity is Severity.LOW
+    assert finding.severity_source is SeveritySource.OVERRIDE
+    assert result.applied_severity_overrides == (override,)
+    assert result.verdict.passed is True
+
+
+def test_expired_severity_override_lets_the_ordinary_precedence_chain_apply() -> None:
+    gitleaks = StaticToolIntegration(
+        name="gitleaks",
+        version="8.18.0",
+        category=Category.SECRETS,
+        argv=("gitleaks", "detect"),
+        raw_findings=(_secret_raw_finding(),),
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+    override = SeverityOverride(
+        tool="gitleaks",
+        rule_id="aws-access-key",
+        severity=Severity.LOW,
+        reason="False positive pattern specific to our test fixtures",
+        owner="team-atlas",
+        expires_at=_NOW.date() - timedelta(days=1),
+    )
+    config = _config_with_fail_on(Severity.HIGH, policy=Policy(severity_overrides=(override,)))
+
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=config)
+
+    [finding] = result.findings
+    assert finding.severity is Severity.HIGH
+    assert finding.severity_source is SeveritySource.CATEGORY_DEFAULT
+    assert result.applied_severity_overrides == ()
+    assert result.expired_severity_overrides == (override,)
+
+
+def test_severity_override_scoped_to_a_different_repository_does_not_apply() -> None:
+    gitleaks = StaticToolIntegration(
+        name="gitleaks",
+        version="8.18.0",
+        category=Category.SECRETS,
+        argv=("gitleaks", "detect"),
+        raw_findings=(_secret_raw_finding(),),
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+    override = SeverityOverride(
+        tool="gitleaks",
+        rule_id="aws-access-key",
+        severity=Severity.LOW,
+        reason="Scoped to a different repository",
+        owner="team-atlas",
+        expires_at=_NOW.date() + timedelta(days=1),
+        repositories=("some-other-repo",),
+    )
+    config = _config_with_fail_on(Severity.HIGH, policy=Policy(severity_overrides=(override,)))
+
+    result = _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=config)
+
+    [finding] = result.findings
+    assert finding.severity is Severity.HIGH
+    assert result.applied_severity_overrides == ()
+    assert result.expired_severity_overrides == ()
 
 
 # --- per-integration configuration (ADR §8.5) --------------------------------

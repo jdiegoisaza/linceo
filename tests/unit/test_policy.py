@@ -12,6 +12,7 @@ from linceo.core.fingerprint import sca_fingerprint, secret_fingerprint
 from linceo.core.policy import (
     Exclusion,
     PolicyConfigurationError,
+    SeverityOverride,
     ToolSkip,
     apply_exclusions,
     baseline_wave_expiry,
@@ -20,6 +21,7 @@ from linceo.core.policy import (
     plan_baseline_migration,
     render_exclusion_fragment,
     render_exclusions_toml,
+    resolve_severity_overrides,
     split_tool_skips,
     thresholds_from_fail_on,
     validate_thresholds,
@@ -259,6 +261,254 @@ def test_tool_skip_expiring_today_is_still_active() -> None:
     assert lapsed == ()
 
 
+# --- severity overrides (ADR §6, §8.4) --------------------------------------
+
+
+def _override(
+    *,
+    tool: str = "gitleaks",
+    rule_id: str = "generic-api-key",
+    severity: Severity = Severity.MEDIUM,
+    expires_at: date,
+    repositories: tuple[str, ...] = (),
+) -> SeverityOverride:
+    return SeverityOverride(
+        tool=tool,
+        rule_id=rule_id,
+        severity=severity,
+        reason="noisy in our fixtures",
+        owner="team-atlas",
+        expires_at=expires_at,
+        repositories=repositories,
+    )
+
+
+def test_active_severity_override_is_folded_into_the_overrides_mapping() -> None:
+    override = _override(expires_at=TODAY + timedelta(days=1))
+
+    outcome = resolve_severity_overrides((override,), today=TODAY, repository=_REPOSITORY)
+
+    assert outcome.overrides == {("gitleaks", "generic-api-key"): Severity.MEDIUM}
+    assert outcome.active == (override,)
+    assert outcome.expired == ()
+
+
+def test_severity_override_expiring_today_is_still_active() -> None:
+    override = _override(expires_at=TODAY)
+
+    outcome = resolve_severity_overrides((override,), today=TODAY, repository=_REPOSITORY)
+
+    assert outcome.active == (override,)
+
+
+def test_expired_severity_override_is_not_folded_into_the_overrides_mapping() -> None:
+    override = _override(expires_at=TODAY - timedelta(days=1))
+
+    outcome = resolve_severity_overrides((override,), today=TODAY, repository=_REPOSITORY)
+
+    assert outcome.overrides == {}
+    assert outcome.active == ()
+    assert outcome.expired == (override,)
+
+
+def test_global_severity_override_applies_to_any_repository() -> None:
+    override = _override(expires_at=TODAY + timedelta(days=1))
+
+    outcome = resolve_severity_overrides((override,), today=TODAY, repository="some-other-repo")
+
+    assert outcome.active == (override,)
+
+
+def test_scoped_severity_override_not_matching_the_repository_does_not_apply() -> None:
+    override = _override(expires_at=TODAY + timedelta(days=1), repositories=("orion-api",))
+
+    outcome = resolve_severity_overrides((override,), today=TODAY, repository=_REPOSITORY)
+
+    assert outcome.overrides == {}
+    assert outcome.active == ()
+    assert outcome.expired == ()
+
+
+def test_two_active_overrides_for_the_same_tool_and_rule_id_is_ambiguous() -> None:
+    first = _override(severity=Severity.LOW, expires_at=TODAY + timedelta(days=1))
+    second = _override(severity=Severity.MEDIUM, expires_at=TODAY + timedelta(days=1))
+
+    with pytest.raises(PolicyConfigurationError, match="generic-api-key"):
+        resolve_severity_overrides((first, second), today=TODAY, repository=_REPOSITORY)
+
+
+def test_two_overrides_scoped_to_different_repositories_do_not_conflict() -> None:
+    first = _override(severity=Severity.LOW, expires_at=TODAY + timedelta(days=1))
+    second = _override(
+        severity=Severity.MEDIUM,
+        expires_at=TODAY + timedelta(days=1),
+        repositories=("orion-api",),
+    )
+
+    outcome = resolve_severity_overrides((first, second), today=TODAY, repository=_REPOSITORY)
+
+    assert outcome.overrides == {("gitleaks", "generic-api-key"): Severity.LOW}
+
+
+def test_severity_override_missing_reason_or_owner_cannot_construct_one_at_all() -> None:
+    with pytest.raises(TypeError):
+        SeverityOverride(  # type: ignore[call-arg]
+            tool="gitleaks", rule_id="generic-api-key", severity=Severity.LOW, expires_at=TODAY
+        )
+
+
+# --- severity override parsing (ADR §6, §8.4) -------------------------------
+
+
+def test_severity_override_parses_from_a_document() -> None:
+    document = {
+        "severity_overrides": [
+            {
+                "tool": "gitleaks",
+                "rule_id": "generic-api-key",
+                "severity": "medium",
+                "reason": "false positive pattern in our fixtures",
+                "owner": "team-atlas",
+                "expires_at": TODAY + timedelta(days=30),
+            }
+        ]
+    }
+
+    parsed = parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+    [override] = parsed.severity_overrides
+    assert override.tool == "gitleaks"
+    assert override.rule_id == "generic-api-key"
+    assert override.severity is Severity.MEDIUM
+    assert override.owner == "team-atlas"
+    assert override.repositories == ()
+
+
+def test_severity_override_accepts_info_as_a_target_severity() -> None:
+    """Unlike a `[thresholds]` key, INFO is a perfectly valid override target (ADR §6)."""
+    document = {
+        "severity_overrides": [
+            {
+                "tool": "trivy",
+                "rule_id": "CVE-2024-0001",
+                "severity": "info",
+                "reason": "not exploitable in our deployment",
+                "owner": "team-atlas",
+                "expires_at": TODAY + timedelta(days=30),
+            }
+        ]
+    }
+
+    parsed = parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+    assert parsed.severity_overrides[0].severity is Severity.INFO
+
+
+def test_severity_override_with_repositories_scope_round_trips() -> None:
+    document = {
+        "severity_overrides": [
+            {
+                "tool": "gitleaks",
+                "rule_id": "generic-api-key",
+                "severity": "low",
+                "reason": "scoped exception",
+                "owner": "team-atlas",
+                "expires_at": TODAY + timedelta(days=30),
+                "repositories": ["orion-web", "orion-api"],
+            }
+        ]
+    }
+
+    parsed = parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+    assert parsed.severity_overrides[0].repositories == ("orion-web", "orion-api")
+
+
+def test_severity_override_missing_a_required_field_is_a_configuration_error() -> None:
+    document = {
+        "severity_overrides": [
+            {"tool": "gitleaks", "rule_id": "generic-api-key", "severity": "low"}
+        ]
+    }
+
+    with pytest.raises(PolicyConfigurationError, match="missing required field"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
+def test_severity_override_with_an_unknown_field_is_a_configuration_error() -> None:
+    document = {
+        "severity_overrides": [
+            {
+                "tool": "gitleaks",
+                "rule_id": "generic-api-key",
+                "severity": "low",
+                "reason": "x",
+                "owner": "alice",
+                "expires_at": TODAY,
+                "bogus": "x",
+            }
+        ]
+    }
+
+    with pytest.raises(PolicyConfigurationError, match="unknown field"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
+def test_severity_override_with_an_unknown_severity_is_a_configuration_error() -> None:
+    document = {
+        "severity_overrides": [
+            {
+                "tool": "gitleaks",
+                "rule_id": "generic-api-key",
+                "severity": "bogus",
+                "reason": "x",
+                "owner": "alice",
+                "expires_at": TODAY,
+            }
+        ]
+    }
+
+    with pytest.raises(PolicyConfigurationError, match="unknown severity"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
+def test_severity_override_beyond_the_max_horizon_is_a_configuration_error() -> None:
+    document = {
+        "severity_overrides": [
+            {
+                "tool": "gitleaks",
+                "rule_id": "generic-api-key",
+                "severity": "low",
+                "reason": "x",
+                "owner": "alice",
+                "expires_at": TODAY + timedelta(days=91),
+            }
+        ]
+    }
+
+    with pytest.raises(PolicyConfigurationError, match="gitleaks/generic-api-key"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
+def test_severity_override_repositories_not_a_list_of_strings_is_a_configuration_error() -> None:
+    document = {
+        "severity_overrides": [
+            {
+                "tool": "gitleaks",
+                "rule_id": "generic-api-key",
+                "severity": "low",
+                "reason": "x",
+                "owner": "alice",
+                "expires_at": TODAY,
+                "repositories": "orion-web",
+            }
+        ]
+    }
+
+    with pytest.raises(PolicyConfigurationError, match="repositories must be a list"):
+        parse_policy_document(document, today=TODAY, max_horizon_days=90)
+
+
 # --- thresholds ----------------------------------------------------------------
 
 
@@ -395,6 +645,7 @@ def test_document_with_no_policy_sections_parses_to_empty() -> None:
     assert parsed.category_thresholds == {}
     assert parsed.exclusions == ()
     assert parsed.tool_skips == ()
+    assert parsed.severity_overrides == ()
 
 
 # --- per-category thresholds (ADR §8.1) -----------------------------------------

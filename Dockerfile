@@ -54,10 +54,20 @@ ARG UV_VERSION=0.12.15
 # first FROM, so both `python-build` (bakes it into the installed wheel's
 # own version metadata, since that stage's build context carries no `.git`
 # for hatch-vcs to read) and `final` (OCI label) resolve the exact same
-# value. The default is this project's pre-release placeholder, matching
-# `[tool.hatch.version.raw-options].fallback_version` in pyproject.toml —
-# a local `docker build` with no override behaves exactly like a local
-# `uv build` with no tag in scope.
+# value.
+#
+# The literal default below is this project's own pre-release placeholder
+# — the exact same one hatch-vcs itself falls back to
+# (`[tool.hatch.version.raw-options].fallback_version` in pyproject.toml)
+# when no git tag is in scope, so a local `docker build` with no override
+# behaves exactly like a local `uv build` with no tag in scope, the same
+# fallback either way rather than a second, independently invented one.
+# It is still a second literal, not a computed reference to the first —
+# Docker has no mechanism for an `ARG` default to read another file at
+# build time — so it is not "derived from" pyproject.toml so much as
+# "asserted equal to it": `tests/unit/test_dockerfile_version.py` fails
+# the moment the two drift apart, which is what actually keeps this
+# honest, not the comment you are reading right now.
 ARG LINCEO_VERSION=0.1.0.dev0
 
 # ---------------------------------------------------------------------------

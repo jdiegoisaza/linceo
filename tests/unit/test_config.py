@@ -677,6 +677,34 @@ def test_tool_skips_load_through_the_config_file(tmp_path: Path) -> None:
     assert tool_skip.expires_at == date(2026, 10, 1)
 
 
+def test_severity_overrides_load_through_the_config_file(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[[severity_overrides]]\n"
+        'tool = "gitleaks"\n'
+        'rule_id = "generic-api-key"\n'
+        'severity = "medium"\n'
+        'reason = "False positive pattern specific to our test fixtures"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-11-30\n"
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    [override] = config.policy.severity_overrides
+    assert override.tool == "gitleaks"
+    assert override.rule_id == "generic-api-key"
+    assert override.severity is Severity.MEDIUM
+    assert override.owner == "team-atlas"
+    assert override.expires_at == date(2026, 11, 30)
+
+
 # --- per-integration configuration loaded through the same file (ADR §8.5) ---
 
 
@@ -870,6 +898,31 @@ def test_remote_document_never_touches_local_exclusions(tmp_path: Path) -> None:
 
     [exclusion] = config.policy.exclusions
     assert exclusion.fingerprint == "v1:abc"
+
+
+def test_remote_document_never_touches_local_severity_overrides(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[[severity_overrides]]\n"
+        'tool = "gitleaks"\n'
+        'rule_id = "generic-api-key"\n'
+        'severity = "medium"\n'
+        'reason = "local team decision"\n'
+        'owner = "team-atlas"\n'
+        "expires_at = 2026-11-30\n"
+    )
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+        remote_document={"thresholds": {"critical": 0}},
+    )
+
+    [override] = config.policy.severity_overrides
+    assert override.tool == "gitleaks"
 
 
 def test_a_governed_key_the_remote_document_is_silent_on_falls_back_to_the_local_file(

@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+from collections.abc import Mapping
+from datetime import date
+from types import MappingProxyType
 
 import jsonschema
 import pytest
@@ -19,7 +22,7 @@ from linceo.core.context import ExecutionContext, Platform
 from linceo.core.execution import ExecutionStatus, ToolExecution
 from linceo.core.findings import Category, Finding, Location, Package
 from linceo.core.gate import evaluate_gate
-from linceo.core.policy import ConfigLayer, ThresholdResolution
+from linceo.core.policy import ConfigLayer, Exclusion, ThresholdResolution
 from linceo.core.results import RunResult, RunStatus
 from linceo.core.sarif import SARIF_VERSION, render_sarif
 from linceo.core.severity import Severity, SeveritySource
@@ -108,7 +111,10 @@ def _execution(
 
 
 def _result(
-    executions: tuple[ToolExecution, ...], *, suppressed_findings: tuple[Finding, ...] = ()
+    executions: tuple[ToolExecution, ...],
+    *,
+    suppressed_findings: tuple[Finding, ...] = (),
+    suppressed_by: Mapping[str, Exclusion] = MappingProxyType({}),
 ) -> RunResult:
     all_findings = tuple(f for execution in executions for f in execution.findings)
     resolution = ThresholdResolution.for_fail_on(None, source=ConfigLayer.DEFAULT)
@@ -121,6 +127,7 @@ def _result(
         status=RunStatus.COMPLETED,
         severity_map_version="test-map-v1",
         suppressed_findings=suppressed_findings,
+        suppressed_by=suppressed_by,
     )
 
 
@@ -406,8 +413,14 @@ def test_fingerprint_travels_in_partial_fingerprints() -> None:
     assert sarif_result["partialFingerprints"]["linceo/fingerprint"] == finding.fingerprint
 
 
-def test_suppressed_finding_carries_an_external_suppression() -> None:
+def test_suppressed_finding_carries_an_external_suppression_with_justification() -> None:
     finding = _secret_finding()
+    exclusion = Exclusion(
+        fingerprint=finding.fingerprint,
+        reason="Synthetic credential in the parser test corpus",
+        owner="team-atlas",
+        expires_at=date(2026, 11, 30),
+    )
     result = _result(
         (
             _execution(
@@ -418,13 +431,22 @@ def test_suppressed_finding_carries_an_external_suppression() -> None:
             ),
         ),
         suppressed_findings=(finding,),
+        suppressed_by={finding.fingerprint: exclusion},
     )
 
     document = json.loads(render_sarif(result))
 
     _validate(document)
     [sarif_result] = document["runs"][0]["results"]
-    assert sarif_result["suppressions"] == [{"kind": "external"}]
+    assert sarif_result["suppressions"] == [
+        {
+            "kind": "external",
+            "justification": (
+                "Synthetic credential in the parser test corpus "
+                "(owner: team-atlas, expires: 2026-11-30)"
+            ),
+        }
+    ]
 
 
 def test_active_finding_carries_no_suppression() -> None:

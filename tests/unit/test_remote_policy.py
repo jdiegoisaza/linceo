@@ -121,6 +121,12 @@ def test_skipped_tools_in_a_remote_document_is_a_configuration_error() -> None:
         validate_remote_document({"skipped_tools": []})
 
 
+def test_severity_overrides_in_a_remote_document_is_a_configuration_error() -> None:
+    """A severity override, like an exclusion, carries a mandatory audit trail — local-only."""
+    with pytest.raises(PolicyConfigurationError, match="local-only by governance design"):
+        validate_remote_document({"severity_overrides": []})
+
+
 def test_an_unrelated_key_in_a_remote_document_is_a_configuration_error() -> None:
     with pytest.raises(PolicyConfigurationError, match="governance surface"):
         validate_remote_document({"remote_policy": {"repository": "other"}})

@@ -9,13 +9,13 @@ and an exit code per tool (ADR §1, "Invariante de aceptación").
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from linceo.core.context import ExecutionContext
 from linceo.core.execution import ToolExecution
 from linceo.core.findings import Category, Finding
-from linceo.core.policy import Exclusion, ThresholdResolution, ToolSkip
+from linceo.core.policy import Exclusion, SeverityOverride, ThresholdResolution, ToolSkip
 from linceo.core.remote_policy import PolicySourceStatus
 from linceo.core.severity import Severity
 
@@ -105,10 +105,26 @@ class RunResult:
     `expires_at` has lapsed, so a report can call those out by name for
     someone to re-triage (ADR §8.2) — a finding covered by an expired entry
     is suppressed no longer, and so appears in the gate's evidence, not in
-    `suppressed_findings`. `applied_tool_skips` names the `ToolSkip`
-    entries that were active for this run (each corresponding to a
-    `ToolExecution` with `status = SKIPPED_BY_POLICY`); `expired_tool_skips`
-    names ones that had lapsed, whose tool ran normally instead.
+    `suppressed_findings`. `suppressed_by` maps each suppressed finding's
+    own fingerprint to the exact `Exclusion` that suppressed it — the
+    piece `suppressed_findings` alone never carried (*that* a finding is
+    suppressed, but not *why*, by whom, or until when) and what
+    `linceo.core.sarif` reads to fill a suppressed SARIF result's own
+    `justification` field, instead of leaving it absent. `applied_tool_skips`
+    names the `ToolSkip` entries that were active for this run (each
+    corresponding to a `ToolExecution` with `status = SKIPPED_BY_POLICY`);
+    `expired_tool_skips` names ones that had lapsed, whose tool ran
+    normally instead.
+
+    `applied_severity_overrides` names the `SeverityOverride` entries that
+    were in scope and unexpired for this run's repository — each already
+    folded into the `SeverityNormalizer` that produced `findings`, so this
+    is a *declaration* of which reclassifications shaped the evidence
+    above, not a second application of them; `expired_severity_overrides`
+    names ones that had lapsed, whose findings resolved through the
+    ordinary precedence chain instead (ADR §6, §8.4) — the same
+    "never silent" transparency `expired_exclusions` already gives a
+    lapsed suppression, extended to a lapsed severity reclassification.
 
     `policy_source` is `None` unless this run declared `[remote_policy]`
     (ADR R2, §8.4) — copied straight from
@@ -136,7 +152,10 @@ class RunResult:
     status: RunStatus
     severity_map_version: str
     suppressed_findings: tuple[Finding, ...] = ()
+    suppressed_by: Mapping[str, Exclusion] = field(default_factory=dict)
     expired_exclusions: tuple[Exclusion, ...] = ()
     applied_tool_skips: tuple[ToolSkip, ...] = ()
     expired_tool_skips: tuple[ToolSkip, ...] = ()
+    applied_severity_overrides: tuple[SeverityOverride, ...] = ()
+    expired_severity_overrides: tuple[SeverityOverride, ...] = ()
     policy_source: PolicySourceStatus | None = None

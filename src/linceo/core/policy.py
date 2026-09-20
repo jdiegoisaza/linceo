@@ -269,10 +269,46 @@ class ToolSkip:
 
 
 @dataclass(frozen=True, slots=True)
-class Policy:
-    """A run's exclusions and temporary tool skips — the non-scalar half of the policy document.
+class SeverityOverride:
+    """A local, time-bound severity reclassification for one `(tool, rule_id)` pair (ADR §6, §8.4).
 
-    Kept separate from `linceo.core.config.Config` (which carries the
+    ADR §6 names a client override as the strongest link in the severity
+    precedence chain — "decisión humana explícita... gana siempre sobre
+    cualquier señal automática" — but `SeverityNormalizer.overrides` had no
+    path from `.devsecops/config.toml` until this existed. Modeled with
+    exactly `Exclusion`'s own audit fields (`reason`, `owner`, `expires_at`,
+    `repositories`) rather than looser ones, deliberately: an override that
+    *lowers* a finding's severity is functionally an escape hatch from the
+    gate, exactly like an exclusion is — a governed `[thresholds] high = 0`
+    means nothing to a finding an override already reclassified as
+    `medium` before the gate ever evaluates it. This project already has a
+    governance answer for escape hatches (ADR §8.2): allow them locally,
+    but never silently and never forever. The same answer applies here
+    rather than a new one being invented — see
+    `linceo.core.remote_policy`'s module docstring for why this section,
+    like `[[exclusions]]`/`[[skipped_tools]]`, is local-only, and a remote
+    policy document may never declare it. A *permanent*, unaudited,
+    org-wide severity policy — the ADR §14 question of whether
+    `severity_map.toml` itself should be extensible from a policy document
+    — is a separate, still-deliberately-deferred question this type does
+    not attempt to answer.
+    """
+
+    tool: str
+    rule_id: str
+    severity: Severity
+    reason: str
+    owner: str
+    expires_at: date
+    repositories: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Policy:
+    """A run's exclusions, temporary tool skips, and severity overrides.
+
+    The non-scalar half of the policy document. Kept separate from
+    `linceo.core.config.Config` (which carries the
     scalar settings, including the resolved `ThresholdResolution`) the same
     way the ADR §8.2 baseline was always a value distinct from the rest of
     configuration — this is that same mechanism, generalized, not a new one
@@ -281,6 +317,7 @@ class Policy:
 
     exclusions: tuple[Exclusion, ...] = ()
     tool_skips: tuple[ToolSkip, ...] = ()
+    severity_overrides: tuple[SeverityOverride, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,11 +329,21 @@ class ExclusionOutcome:
     distinctly and prominently, which exclusions lapsed and need a decision
     (ADR §8.2) — an expired entry's finding is *also* included in `active`,
     since a lapsed exclusion counts against the gate again.
+
+    `suppressed_by` maps each suppressed finding's fingerprint to the exact
+    `Exclusion` that suppressed it — the piece `suppressed`/`suppressed_findings`
+    alone never carried: *that* a finding is suppressed, but not *why*, by
+    whom, or until when. Without this, a SARIF consumer (GitHub Code
+    Scanning, e.g.) could only show that a result was suppressed, never the
+    `reason`/`owner`/`expires_at` that makes the suppression auditable
+    (`linceo.core.sarif`'s own `justification` field exists precisely to
+    carry this).
     """
 
     active: tuple[Finding, ...]
     suppressed: tuple[Finding, ...]
     expired: tuple[Exclusion, ...]
+    suppressed_by: Mapping[str, Exclusion] = field(default_factory=dict)
 
 
 def _match_fingerprint(
@@ -344,7 +391,7 @@ def apply_exclusions(
     """
     findings_by_fingerprint = {finding.fingerprint: finding for finding in findings}
 
-    suppressed_fingerprints: set[str] = set()
+    suppressed_by: dict[str, Exclusion] = {}
     expired: list[Exclusion] = []
 
     applicable = (
@@ -359,11 +406,13 @@ def apply_exclusions(
         if exclusion.expires_at < today:
             expired.append(exclusion)
         else:
-            suppressed_fingerprints.add(match.fingerprint)
+            suppressed_by[match.fingerprint] = exclusion
 
-    active = tuple(f for f in findings if f.fingerprint not in suppressed_fingerprints)
-    suppressed = tuple(f for f in findings if f.fingerprint in suppressed_fingerprints)
-    return ExclusionOutcome(active=active, suppressed=suppressed, expired=tuple(expired))
+    active = tuple(f for f in findings if f.fingerprint not in suppressed_by)
+    suppressed = tuple(f for f in findings if f.fingerprint in suppressed_by)
+    return ExclusionOutcome(
+        active=active, suppressed=suppressed, expired=tuple(expired), suppressed_by=suppressed_by
+    )
 
 
 def split_tool_skips(
@@ -380,10 +429,71 @@ def split_tool_skips(
 
 
 @dataclass(frozen=True, slots=True)
-class PolicyDocument:
-    """Everything a document's `[thresholds]`/`[[exclusions]]`/`[[skipped_tools]]` resolve to.
+class SeverityOverrideOutcome:
+    """The result of resolving a `Policy`'s severity overrides for one run (ADR §6, §8.4).
 
-    Produced by `parse_policy_document` from already-decoded data — a local
+    `overrides` is the `(tool, rule_id) -> Severity` mapping
+    `SeverityNormalizer.overrides` actually needs — already filtered by
+    repository scope and expiry, ready to fold into the normalizer with no
+    further logic. `active` and `expired` mirror `ExclusionOutcome`'s own
+    split, for the exact same reason (ADR §8.2's "never silent" reporting,
+    extended to overrides): a report can show which reclassifications
+    shaped this run's evidence, and which lapsed and need a decision.
+    """
+
+    overrides: Mapping[tuple[str, str], Severity]
+    active: tuple[SeverityOverride, ...]
+    expired: tuple[SeverityOverride, ...]
+
+
+def resolve_severity_overrides(
+    severity_overrides: tuple[SeverityOverride, ...], *, today: date, repository: str
+) -> SeverityOverrideOutcome:
+    """Resolve which of `severity_overrides` apply to this run, by repository scope and expiry.
+
+    Mirrors `apply_exclusions`'s own scoping and expiry rules (ADR §8.2,
+    extended to overrides): an override whose `repositories` is non-empty
+    and does not include `repository` simply does not apply — neither
+    active nor expired for this run, the same treatment an out-of-scope
+    exclusion already gets.
+
+    Raises:
+        PolicyConfigurationError: if two applicable, unexpired overrides
+            declare the same `(tool, rule_id)` — an ambiguity this
+            function refuses to resolve by picking one silently, the same
+            principle behind `_match_fingerprint`'s own ambiguity check
+            for exclusions.
+    """
+    applicable = [
+        override
+        for override in severity_overrides
+        if not override.repositories or repository in override.repositories
+    ]
+    active = tuple(o for o in applicable if o.expires_at >= today)
+    expired = tuple(o for o in applicable if o.expires_at < today)
+
+    overrides: dict[tuple[str, str], Severity] = {}
+    for override in active:
+        key = (override.tool, override.rule_id)
+        if key in overrides:
+            msg = (
+                f"severity_overrides declares more than one entry for {override.tool}/"
+                f"{override.rule_id} applicable to repository {repository!r} — remove the "
+                "duplicate, or scope one of them to a different repositories list"
+            )
+            raise PolicyConfigurationError(msg)
+        overrides[key] = override.severity
+
+    return SeverityOverrideOutcome(overrides=overrides, active=active, expired=expired)
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyDocument:
+    """Everything a policy document's non-scalar sections resolve to.
+
+    Covers `[thresholds]`, `[[exclusions]]`, `[[skipped_tools]]`, and
+    `[[severity_overrides]]`. Produced by `parse_policy_document` from
+    already-decoded data — a local
     TOML file today, any other source later without this shape changing
     (ADR §8). `thresholds` is `None` when the document declares no direct
     `severity = count` entries under `[thresholds]`, distinct from an empty
@@ -399,6 +509,7 @@ class PolicyDocument:
     category_thresholds: CategoryThresholds
     exclusions: tuple[Exclusion, ...]
     tool_skips: tuple[ToolSkip, ...]
+    severity_overrides: tuple[SeverityOverride, ...]
 
 
 _EXCLUSION_REQUIRED_FIELDS = frozenset({"fingerprint", "reason", "owner", "expires_at"})
@@ -409,6 +520,10 @@ _EXCLUSION_IDENTITY_FIELDS = frozenset(
 )
 _EXCLUSION_KNOWN_FIELDS = _EXCLUSION_REQUIRED_FIELDS | {"repositories"} | _EXCLUSION_IDENTITY_FIELDS
 _TOOL_SKIP_REQUIRED_FIELDS = frozenset({"tool", "reason", "owner", "expires_at"})
+_SEVERITY_OVERRIDE_REQUIRED_FIELDS = frozenset(
+    {"tool", "rule_id", "severity", "reason", "owner", "expires_at"}
+)
+_SEVERITY_OVERRIDE_KNOWN_FIELDS = _SEVERITY_OVERRIDE_REQUIRED_FIELDS | {"repositories"}
 
 
 def _parse_date(value: object, *, field: str) -> date:
@@ -661,6 +776,78 @@ def _parse_tool_skip(
     return tool_skip
 
 
+def _parse_severity_value(value: object, *, context: str) -> Severity:
+    """Parse a single `severity = "..."` scalar value (unlike `_parse_severity_table`'s keys).
+
+    Raises:
+        PolicyConfigurationError: if `value` does not name a known
+            `Severity`. Unlike a `[thresholds]` entry, `Severity.INFO` is a
+            perfectly valid override target — the ADR §6 ban is on INFO as
+            a *threshold* key (a threshold on it would be meaningless,
+            since INFO never blocks the gate), not on a finding actually
+            being classified INFO, which `severity_map.toml` itself
+            already allows.
+    """
+    try:
+        return Severity(str(value).strip().upper())
+    except ValueError as exc:
+        msg = f"unknown severity in {context}: {value!r}"
+        raise PolicyConfigurationError(msg) from exc
+
+
+def _parse_severity_override(
+    entry: Mapping[str, object], *, today: date, max_horizon_days: int
+) -> SeverityOverride:
+    """Parse and validate one `[[severity_overrides]]` entry.
+
+    `entry` is already known to be a table — `_as_table_list` guarantees
+    that for every item it returns — so this only validates its fields.
+    Mirrors `_parse_exclusion` closely: the same required audit fields
+    (`reason`, `owner`, `expires_at`), the same optional `repositories`
+    scope, the same expiry-horizon validation — deliberately, since a
+    severity override is governed the same way an exclusion is (ADR §6,
+    §8.4; see `SeverityOverride`'s own docstring for why).
+
+    Raises:
+        PolicyConfigurationError: for an unknown or missing field, an
+            invalid `repositories` value, an unrecognized `severity`, or
+            an `expires_at` beyond `max_horizon_days`.
+    """
+    unknown = set(entry) - _SEVERITY_OVERRIDE_KNOWN_FIELDS
+    if unknown:
+        msg = f"severity_overrides entry declares unknown field(s): {sorted(unknown)}"
+        raise PolicyConfigurationError(msg)
+    missing = _SEVERITY_OVERRIDE_REQUIRED_FIELDS - set(entry)
+    if missing:
+        msg = f"severity_overrides entry is missing required field(s): {sorted(missing)}"
+        raise PolicyConfigurationError(msg)
+
+    repositories_raw = entry.get("repositories", ())
+    if not isinstance(repositories_raw, list | tuple) or not all(
+        isinstance(item, str) for item in repositories_raw
+    ):
+        msg = "severity_overrides.repositories must be a list of strings"
+        raise PolicyConfigurationError(msg)
+
+    expires_at = _parse_date(entry["expires_at"], field="severity_overrides.expires_at")
+    override = SeverityOverride(
+        tool=str(entry["tool"]),
+        rule_id=str(entry["rule_id"]),
+        severity=_parse_severity_value(entry["severity"], context="severity_overrides.severity"),
+        reason=str(entry["reason"]),
+        owner=str(entry["owner"]),
+        expires_at=expires_at,
+        repositories=tuple(repositories_raw),
+    )
+    _validate_horizon(
+        f"{override.tool}/{override.rule_id}",
+        expires_at,
+        today=today,
+        max_horizon_days=max_horizon_days,
+    )
+    return override
+
+
 def parse_policy_document(
     document: Mapping[str, object], *, today: date, max_horizon_days: int
 ) -> PolicyDocument:
@@ -669,12 +856,12 @@ def parse_policy_document(
     `document` is decoded TOML data today — or any mapping shaped the same
     way, so a future remote source produces this same shape without this
     function changing (ADR §8). Only the keys `thresholds`, `exclusions`,
-    and `skipped_tools` are read; an unknown top-level key is
-    `linceo.core.config`'s concern, not this function's.
+    `skipped_tools`, and `severity_overrides` are read; an unknown
+    top-level key is `linceo.core.config`'s concern, not this function's.
 
     Raises:
         PolicyConfigurationError: see `_parse_thresholds`, `_parse_exclusion`,
-            and `_parse_tool_skip`.
+            `_parse_tool_skip`, and `_parse_severity_override`.
     """
     thresholds, category_thresholds = _parse_thresholds(document.get("thresholds"))
     exclusions = tuple(
@@ -685,11 +872,16 @@ def parse_policy_document(
         _parse_tool_skip(entry, today=today, max_horizon_days=max_horizon_days)
         for entry in _as_table_list(document.get("skipped_tools"), name="skipped_tools")
     )
+    severity_overrides = tuple(
+        _parse_severity_override(entry, today=today, max_horizon_days=max_horizon_days)
+        for entry in _as_table_list(document.get("severity_overrides"), name="severity_overrides")
+    )
     return PolicyDocument(
         thresholds=thresholds,
         category_thresholds=category_thresholds,
         exclusions=exclusions,
         tool_skips=tool_skips,
+        severity_overrides=severity_overrides,
     )
 
 
