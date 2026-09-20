@@ -9,8 +9,8 @@ unchanged) — its own job is entirely upstream of that, and entirely about
 
 - **Governance boundary** (ADR §8.4's design note, made concrete). A remote
   document may declare only what security centrally owns and changes a few
-  times a year — `fail_on`/`[thresholds]`/`[thresholds.<category>]` and
-  `[tool_defaults]`/`[tools.<name>]` — never `[[exclusions]]`,
+  times a year — `fail_on`/`[thresholds]`/`[thresholds.<category>]`,
+  `[tool_defaults]`/`[tools.<name>]`, and `banner` (ADR §7) — never `[[exclusions]]`,
   `[[skipped_tools]]`, or `[[severity_overrides]]`, each of which a team
   owns locally and changes every week (`severity_overrides` joined this
   set for exactly the same reason as `exclusions`: ADR §6 models a
@@ -86,6 +86,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
+from linceo.core.banner import validate_banner
 from linceo.core.policy import DEFAULT_MAX_POLICY_CACHE_AGE_DAYS, PolicyConfigurationError
 from linceo.core.ports import PolicySource
 
@@ -110,11 +111,17 @@ DEFAULT_TOKEN_ENV_VAR = "SYSTEM_ACCESSTOKEN"  # noqa: S105 -- an env var *name*,
 _DECLARATION_KNOWN_FIELDS = frozenset({"repository", "path", "project", "token_env"})
 
 #: The only top-level keys a remote policy document may declare at all
-#: (ADR §8.4's governance boundary) — thresholds and tool configuration,
-#: nothing else. `version` is accepted but never required or inspected here;
-#: a remote document reuses the same `version = 1` header a local one does,
-#: for the same future-compatibility reason (ADR §8.4).
-_REMOTE_GOVERNED_KEYS = frozenset({"fail_on", "thresholds", "tool_defaults", "tools"})
+#: (ADR §8.4's governance boundary) — thresholds, tool configuration, and
+#: the report banner, nothing else. `version` is accepted but never
+#: required or inspected here; a remote document reuses the same
+#: `version = 1` header a local one does, for the same future-compatibility
+#: reason (ADR §8.4). `banner` (ADR §7) joined this set, not
+#: `_REMOTE_LOCAL_ONLY_KEYS` below, because it is org-wide branding
+#: security decides once, not a per-instance decision needing an audit
+#: trail — see `linceo.core.banner`'s own module docstring for the full
+#: reasoning, including why its *value* gets an extra content check
+#: `_decode_and_validate` runs that the other three governed keys do not.
+_REMOTE_GOVERNED_KEYS = frozenset({"fail_on", "thresholds", "tool_defaults", "tools", "banner"})
 _REMOTE_ALLOWED_TOP_LEVEL_KEYS = frozenset({"version"}) | _REMOTE_GOVERNED_KEYS
 
 #: Local-only sections a remote document must never declare (ADR §8.4's
@@ -437,12 +444,24 @@ def write_cached_policy(cache_path: Path, content: str) -> None:
 def _decode_and_validate(content: str) -> Mapping[str, object]:
     """Parse `content` as TOML and check it against the governance boundary.
 
+    Also validates `banner`'s own content, not just its presence as an
+    allowed key — deliberately unlike the other three governed keys
+    (`fail_on`/`thresholds`/`tool_defaults`/`tools`), whose *values* are
+    left to `linceo.core.config.load_config` to validate once the merged
+    document is parsed, which means an invalid one there is a hard failure
+    for whichever pipeline's run fetched it. A banner earns the stricter,
+    earlier check because its only cost is cosmetic and its blast radius
+    is every pipeline in the organization at once — see
+    `linceo.core.banner`'s own module docstring for the full reasoning.
+
     Raises:
-        RemotePolicyFetchError: if `content` is not valid TOML, or
-            `validate_remote_document` rejects its shape — both folded into
-            this one exception type so `resolve_remote_policy_document`
-            treats "fetched, but unusable" identically to "could not fetch
-            at all" (see `RemotePolicyFetchError`'s own docstring).
+        RemotePolicyFetchError: if `content` is not valid TOML,
+            `validate_remote_document` rejects its shape, or `banner` is
+            present but `linceo.core.banner.validate_banner` rejects its
+            content — all three folded into this one exception type so
+            `resolve_remote_policy_document` treats "fetched, but
+            unusable" identically to "could not fetch at all" (see
+            `RemotePolicyFetchError`'s own docstring).
     """
     try:
         document = tomllib.loads(content)
@@ -451,6 +470,8 @@ def _decode_and_validate(content: str) -> Mapping[str, object]:
         raise RemotePolicyFetchError(msg) from exc
     try:
         validate_remote_document(document)
+        if "banner" in document:
+            validate_banner(document["banner"])
     except PolicyConfigurationError as exc:
         raise RemotePolicyFetchError(str(exc)) from exc
     return document

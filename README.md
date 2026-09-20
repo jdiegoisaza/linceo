@@ -190,10 +190,11 @@ actionable install/upgrade hint printed right there.
 
 ### Remote policy (optional, ADR R2, §8.4)
 
-Thresholds and per-tool configuration can be governed centrally instead of
-per-repository — the case where security maintains one policy document and
-every pipeline inherits it. Declare it in the scanned repository's own
-`.devsecops/config.toml` (never in this repository, R5):
+Thresholds, per-tool configuration, and the report banner (see below) can
+be governed centrally instead of per-repository — the case where security
+maintains one policy document and every pipeline inherits it. Declare it
+in the scanned repository's own `.devsecops/config.toml` (never in this
+repository, R5):
 
 ```toml
 [remote_policy]
@@ -245,6 +246,30 @@ named explicitly (repository, path, branch, permissions — see the same
 doc, "Diagnosticando un 404"), never just the bare HTTP status. The bearer
 token itself is never logged,
 cached, or otherwise persisted (ADR §9).
+
+### Report banner (ADR §7, §8.4)
+
+The console report opens with a one-line ASCII box naming the product —
+`"linceo"` unless a policy document overrides it:
+
+```toml
+banner = "ACME Corp Security Gate"
+```
+
+Governed, like `[thresholds]`/`[tool_defaults]`: it can be set locally, or
+centrally in a remote policy document (see above), where it replaces the
+local one entirely for every pipeline that inherits it — never a
+per-invocation CLI flag or environment variable, since a name an
+organization picks a few times a year has no use for one. Constrained to
+printable ASCII (0x20-0x7E) and at most 72 characters — no control
+characters, no ANSI escape sequences, no embedded newline, since an
+org-wide remote document's content reaches every consuming pipeline's own
+terminal verbatim. An invalid *local* banner is a configuration error like
+any other; an invalid *remote* one degrades to the cached or local banner
+instead of failing every pipeline in the organization over a cosmetic
+mistake — see the ADR amendment for the full reasoning behind that
+asymmetry. Console-only: `--max-rows`'s own reasoning applies here too, so
+neither the JSON report nor SARIF ever carries it.
 
 ## Development
 

@@ -33,6 +33,12 @@ chain, but interact differently:
   environment-variable equivalent, only the policy document's
   `[[exclusions]]`, `[[skipped_tools]]`, `[[severity_overrides]]`, and
   `[tools.<name>]` sections.
+- **`banner`** (ADR §7) is a flat scalar like `fail_on`, but with neither a
+  CLI flag nor an environment variable either: it is read directly off the
+  merged document (local, or remote-governed when `[remote_policy]`
+  resolved one — `linceo.core.remote_policy._REMOTE_GOVERNED_KEYS`), then
+  validated once here (`linceo.core.banner.validate_banner`) regardless of
+  which layer it came from.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
+from linceo.core.banner import DEFAULT_BANNER, validate_banner
 from linceo.core.policy import (
     DEFAULT_MAX_HORIZON_DAYS,
     DEFAULT_REPORT_MAX_ROWS,
@@ -108,6 +115,7 @@ _FILE_TOP_LEVEL_KNOWN_KEYS = frozenset(
         "tool_defaults",
         "tools",
         "remote_policy",
+        "banner",
     }
 )
 
@@ -164,14 +172,17 @@ class Config:
     (local-only). `policy` (exclusions, tool skips, severity overrides) is
     never affected by this either way — all three sections are local-only
     by design (ADR §8.4, §6) and are not part of what a remote source can
-    govern.
+    govern. `banner` (ADR §7), unlike `policy`, *is* part of what a remote
+    source can govern, alongside `threshold_resolution` and
+    `tool_defaults`/`tool_configs` — org-wide branding security decides
+    once, not a per-instance decision needing `policy`'s own audit trail.
 
     Every field defaults to the permissive, reporting-only choice the ADR
     documents: no gate configured (§8.1), `continue_on_tool_error = False`
     (§5), `strict_normalization = False` (§6), the default 90-day exclusion
     horizon, the default 20-row console table (§7, §8.2), no integration
-    configured beyond its own built-in defaults (§8.5), and no remote
-    policy source (§8.4).
+    configured beyond its own built-in defaults (§8.5), the default
+    `"linceo"` banner (§7), and no remote policy source (§8.4).
     """
 
     threshold_resolution: ThresholdResolution = field(
@@ -184,6 +195,7 @@ class Config:
     policy: Policy = field(default_factory=Policy)
     tool_defaults: ToolConfig = field(default_factory=ToolConfig)
     tool_configs: Mapping[str, ToolConfig] = field(default_factory=dict)
+    banner: str = DEFAULT_BANNER
     policy_source: PolicySourceStatus | None = None
 
 
@@ -537,9 +549,9 @@ def load_config(
     concern (it does no network I/O of its own, like the rest of `core`).
     When `remote_document` is given, its governed keys
     (`linceo.core.remote_policy.merge_remote_into_local`) replace the local
-    document's own for `fail_on`/`[thresholds]`/`[tool_defaults]`/`[tools.<name>]`
-    entirely — never `[[exclusions]]`/`[[skipped_tools]]`, which stay
-    local-only by design. `policy_source` is carried straight onto the
+    document's own for `fail_on`/`[thresholds]`/`[tool_defaults]`/`[tools.<name>]`/`banner`
+    entirely — never `[[exclusions]]`/`[[skipped_tools]]`/`[[severity_overrides]]`,
+    which stay local-only by design. `policy_source` is carried straight onto the
     returned `Config.policy_source`, for a report to declare; both are
     `None` together for the common case of no `[remote_policy]` at all.
 
@@ -548,9 +560,10 @@ def load_config(
             inside `package_root`; the config file is invalid TOML,
             declares an unsupported schema version, or declares an unknown
             field at any level; any layer's scalar value fails to parse
-            into its field's type; or the policy document's
-            `[thresholds]`/`[[exclusions]]`/`[[skipped_tools]]` sections
-            are invalid (see `linceo.core.policy.parse_policy_document`).
+            into its field's type; the policy document's
+            `[thresholds]`/`[[exclusions]]`/`[[skipped_tools]]`/`[[severity_overrides]]`
+            sections are invalid (see `linceo.core.policy.parse_policy_document`);
+            or `banner` fails `linceo.core.banner.validate_banner`.
     """
     _validate_cli_overrides(cli_overrides)
 
@@ -601,6 +614,7 @@ def load_config(
         )
         tool_defaults = parse_tool_defaults(raw_document)
         tool_configs = parse_tool_configs(raw_document)
+        banner = validate_banner(raw_document.get("banner", DEFAULT_BANNER))
     except PolicyConfigurationError as exc:
         raise ConfigurationError(str(exc)) from exc
 
@@ -625,5 +639,6 @@ def load_config(
         ),
         tool_defaults=tool_defaults,
         tool_configs=tool_configs,
+        banner=banner,
         policy_source=policy_source,
     )

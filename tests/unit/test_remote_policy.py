@@ -132,6 +132,13 @@ def test_an_unrelated_key_in_a_remote_document_is_a_configuration_error() -> Non
         validate_remote_document({"remote_policy": {"repository": "other"}})
 
 
+def test_banner_is_accepted_as_a_governed_key() -> None:
+    """`validate_remote_document` checks only the governance boundary — see
+    `test_a_fetched_document_with_an_invalid_banner_degrades_like_a_failed_fetch`
+    for where the banner's own *content* gets checked instead."""
+    validate_remote_document({"banner": "ACME Corp Security Gate"})
+
+
 # --- merge_remote_into_local ---------------------------------------------------
 
 
@@ -167,6 +174,15 @@ def test_merge_of_an_empty_remote_document_changes_nothing() -> None:
     merged = merge_remote_into_local(local_document=local, remote_document={})
 
     assert merged == local
+
+
+def test_merge_overlays_banner_when_the_remote_document_declares_it() -> None:
+    local = {"banner": "local team banner"}
+    remote = {"banner": "ACME Corp Security Gate"}
+
+    merged = merge_remote_into_local(local_document=local, remote_document=remote)
+
+    assert merged["banner"] == "ACME Corp Security Gate"
 
 
 # --- cache directory resolution -------------------------------------------------
@@ -331,6 +347,42 @@ def test_a_fetched_document_declaring_exclusions_degrades_like_a_failed_fetch(
     assert status.state is PolicySourceState.UNAVAILABLE
     assert status.detail is not None
     assert "governance" in status.detail
+
+
+def test_a_fetched_document_with_a_valid_banner_resolves_normally(tmp_path: Path) -> None:
+    source = FakePolicySource(outcome=FetchedPolicy(content='banner = "ACME Corp Security Gate"\n'))
+
+    document, status = resolve_remote_policy_document(
+        source=source, declaration=_DECLARATION, cache_dir=str(tmp_path), now=NOW
+    )
+
+    assert document == {"banner": "ACME Corp Security Gate"}
+    assert status.state is PolicySourceState.FRESH
+
+
+def test_a_fetched_document_with_an_invalid_banner_degrades_like_a_failed_fetch(
+    tmp_path: Path,
+) -> None:
+    """Unlike an invalid `fail_on`/`[thresholds]` value (left to `linceo.core.config.load_config`
+    to reject as a hard failure for the fetching pipeline), an invalid `banner` is checked here,
+    at fetch time, and degrades instead — see `linceo.core.banner`'s own module docstring for
+    why this one governed key gets the more forgiving treatment.
+
+    A non-ASCII character, not a raw control character, is what demonstrates this: TOML itself
+    already refuses an unescaped control character (e.g. a literal `ESC`) as a syntax error
+    before this project's own `banner` check ever runs — `café`-style text is valid TOML and
+    exactly the shape `linceo.core.banner.validate_banner` rejects on its own content.
+    """
+    source = FakePolicySource(outcome=FetchedPolicy(content='banner = "ACME Sécurité"\n'))
+
+    document, status = resolve_remote_policy_document(
+        source=source, declaration=_DECLARATION, cache_dir=str(tmp_path), now=NOW
+    )
+
+    assert document is None
+    assert status.state is PolicySourceState.UNAVAILABLE
+    assert status.detail is not None
+    assert "printable ASCII" in status.detail
 
 
 def test_a_fetched_document_that_is_not_valid_toml_degrades_like_a_failed_fetch(

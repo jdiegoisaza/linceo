@@ -705,6 +705,65 @@ def test_severity_overrides_load_through_the_config_file(tmp_path: Path) -> None
     assert override.expires_at == date(2026, 11, 30)
 
 
+# --- banner (ADR §7) ----------------------------------------------------------
+
+
+def test_banner_defaults_to_linceo_when_absent(tmp_path: Path) -> None:
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    assert config.banner == "linceo"
+
+
+def test_banner_loads_through_the_config_file(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('banner = "ACME Corp Security Gate"\n')
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+    )
+
+    assert config.banner == "ACME Corp Security Gate"
+
+
+def test_a_banner_too_long_is_a_configuration_error_at_load_time(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(f'banner = "{"a" * 73}"\n')
+
+    with pytest.raises(ConfigurationError, match="character maximum"):
+        load_config(
+            explicit_config_path=None,
+            workspace_path=str(tmp_path),
+            package_root=str(tmp_path / "package"),
+            today=TODAY,
+        )
+
+
+def test_a_banner_with_a_non_ascii_character_is_a_configuration_error_at_load_time(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('banner = "ACME Sécurité"\n')
+
+    with pytest.raises(ConfigurationError, match="printable ASCII"):
+        load_config(
+            explicit_config_path=None,
+            workspace_path=str(tmp_path),
+            package_root=str(tmp_path / "package"),
+            today=TODAY,
+        )
+
+
 # --- per-integration configuration loaded through the same file (ADR §8.5) ---
 
 
@@ -875,6 +934,40 @@ def test_remote_document_thresholds_replace_the_local_files_own(tmp_path: Path) 
 
     assert config.threshold_resolution.thresholds == {Severity.CRITICAL: 0}
     assert config.threshold_resolution.source is ConfigLayer.FILE
+
+
+def test_remote_document_banner_replaces_the_local_files_own(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('banner = "local team banner"\n')
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+        remote_document={"banner": "ACME Corp Security Gate"},
+    )
+
+    assert config.banner == "ACME Corp Security Gate"
+
+
+def test_a_governed_banner_the_remote_document_is_silent_on_falls_back_to_the_local_file(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / ".devsecops"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('banner = "local team banner"\n')
+
+    config = load_config(
+        explicit_config_path=None,
+        workspace_path=str(tmp_path),
+        package_root=str(tmp_path / "package"),
+        today=TODAY,
+        remote_document={"thresholds": {"critical": 0}},
+    )
+
+    assert config.banner == "local team banner"
 
 
 def test_remote_document_never_touches_local_exclusions(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from dataclasses import fields, is_dataclass
 from datetime import date, datetime
 from enum import Enum
 
+from linceo.core.banner import DEFAULT_BANNER, render_banner
 from linceo.core.execution import ExecutionStatus
 from linceo.core.findings import Category, Finding
 from linceo.core.fingerprint import short_fingerprints
@@ -347,15 +348,24 @@ def render_console(
     *,
     schemas: Mapping[Category, ReportSchema],
     max_rows: int = DEFAULT_REPORT_MAX_ROWS,
+    banner: str = DEFAULT_BANNER,
 ) -> str:
     """Render `result` as a human-readable console report (ADR §7, §8.1).
 
     `schemas` must have an entry for every category `result.executions`
     ran — the CLI builds it from the same `ToolIntegration`s it constructed
     for the run (`ToolIntegration.report_schema`). `max_rows` bounds only
-    the console tables (ADR §7); it never affects `render_json`.
+    the console tables (ADR §7); it never affects `render_json`. `banner`
+    is `Config.banner` (`"linceo"` unless a policy document, local or
+    remote-governed, overrides it) — rendered first, as its own ASCII box
+    (`linceo.core.banner.render_banner`), and nowhere else: `render_json`
+    and `render_sarif` never take a `banner` parameter at all, since both
+    are data contracts a banner has no place in (see
+    `linceo.core.banner`'s own module docstring).
     """
     lines = [
+        render_banner(banner),
+        "",
         f"Run {result.run_id} — platform={result.context.platform.value} "
         f"repository={result.context.repository} commit={result.context.commit}",
         f"Status: {result.status.value}",

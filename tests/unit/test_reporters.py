@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
 import json
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, date, datetime
 
+from linceo.core.banner import render_banner
 from linceo.core.context import ExecutionContext, Platform
 from linceo.core.execution import ExecutionStatus, ToolExecution
 from linceo.core.findings import Category, Finding, Location
@@ -100,6 +102,37 @@ def _result(
 
 def _render(result: RunResult, **kwargs: object) -> str:
     return render_console(result, schemas=_SCHEMAS, **kwargs)  # type: ignore[arg-type]
+
+
+# --- banner (ADR §7) ------------------------------------------------------------
+
+
+def test_console_report_opens_with_the_default_linceo_banner() -> None:
+    result = _result(fail_on=None, findings=())
+
+    report = _render(result)
+
+    assert report.startswith(render_banner("linceo") + "\n")
+
+
+def test_console_report_opens_with_a_custom_banner_when_given_one() -> None:
+    result = _result(fail_on=None, findings=())
+
+    report = _render(result, banner="ACME Corp Security Gate")
+
+    assert report.startswith(render_banner("ACME Corp Security Gate") + "\n")
+
+
+def test_render_json_has_no_banner_parameter() -> None:
+    """Structural guarantee (ADR §7): the banner is presentation-only, and `render_json` — the
+    project's lossless data contract — cannot even be asked to include it."""
+    assert "banner" not in inspect.signature(render_json).parameters
+
+
+def test_run_result_itself_carries_no_banner_field() -> None:
+    """The banner is resolved from `Config` and threaded straight to `render_console` — it is
+    never attached to the evidence/verdict model at all."""
+    assert "banner" not in {f.name for f in fields(RunResult)}
 
 
 # --- gate verdict lines --------------------------------------------------------
@@ -357,8 +390,9 @@ def test_findings_table_has_the_five_base_columns_and_is_sorted_by_severity() ->
 
     report = _render(result)
 
-    header_line = next(line for line in report.splitlines() if line.strip().startswith("SEVERITY"))
-    assert header_line.split()[:5] == ["SEVERITY", "ID", "LOCATION", "TOOL", "FP"]
+    header_line = next(line for line in report.splitlines() if "SEVERITY" in line)
+    cells = [cell.strip() for cell in header_line.strip().strip("|").split("|")]
+    assert cells[:5] == ["SEVERITY", "ID", "LOCATION", "TOOL", "FP"]
     critical_index = report.index("crit-rule")
     low_index = report.index("low-rule")
     assert critical_index < low_index

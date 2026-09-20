@@ -10,6 +10,7 @@ R2).
 from __future__ import annotations
 
 import importlib.resources
+import inspect
 import json
 from collections.abc import Mapping
 from datetime import date
@@ -509,3 +510,9 @@ def test_sarif_output_is_deterministic() -> None:
     )
 
     assert render_sarif(result) == render_sarif(result)
+
+
+def test_render_sarif_has_no_banner_parameter() -> None:
+    """Structural guarantee (ADR §7): SARIF is an interchange format for GitHub Code Scanning /
+    the Azure DevOps panel, not presentation — the banner has no place in it."""
+    assert "banner" not in inspect.signature(render_sarif).parameters

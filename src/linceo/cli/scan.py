@@ -342,7 +342,12 @@ def _run_scan(
         report = render_sarif(result)
     else:
         schemas = {category: integration.report_schema()}
-        report = render_console(result, schemas=schemas, max_rows=resolved_config.report_max_rows)
+        report = render_console(
+            result,
+            schemas=schemas,
+            max_rows=resolved_config.report_max_rows,
+            banner=resolved_config.banner,
+        )
     typer.echo(report)
 
     exit_code = compute_exit_code(

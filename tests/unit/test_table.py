@@ -76,6 +76,26 @@ def _fps(*fingerprints: str) -> dict[str, str]:
     return {fp: fp for fp in fingerprints}
 
 
+def _cells(line: str) -> list[str]:
+    """Split one `| a | b | c |` box row into its trimmed cell values.
+
+    Used instead of `line.split()` everywhere in this file: a bare
+    whitespace split would also break a multi-word cell apart and would
+    include the border characters themselves as spurious tokens — this
+    parses by column instead, the same way a real consumer of this table
+    (a human eye, following the `|`s) would.
+    """
+    return [cell.strip() for cell in line.strip("|").split("|")]
+
+
+def _row_lines(table: str) -> list[str]:
+    """The data-row lines of a rendered table: everything between the header rule and the
+    bottom border (`ascii_box.border` / `ascii_box.HEADER_RULE_CHAR`, see `linceo.core.table`'s
+    own docstring for the fixed shape: top border, header, header rule, data rows, bottom
+    border)."""
+    return table.splitlines()[3:-1]
+
+
 def test_headers_are_the_five_base_columns_for_a_category_with_no_extras() -> None:
     finding = _secret_finding(severity=Severity.HIGH, rule_id="aws-key", path="src/config.py")
 
@@ -83,7 +103,7 @@ def test_headers_are_the_five_base_columns_for_a_category_with_no_extras() -> No
         [finding], schema=_SECRETS_SCHEMA, short_fingerprints=_fps(finding.fingerprint)
     )
 
-    header = table.splitlines()[0].split()
+    header = _cells(table.splitlines()[1])
     assert header[:5] == ["SEVERITY", "ID", "LOCATION", "TOOL", "FP"]
 
 
@@ -102,9 +122,9 @@ def test_extra_columns_are_appended_after_the_base_five_in_declared_order() -> N
         [finding], schema=_SCA_SCHEMA, short_fingerprints=_fps(finding.fingerprint)
     )
 
-    header = table.splitlines()[0].split()
+    header = _cells(table.splitlines()[1])
     assert header == ["SEVERITY", "ID", "LOCATION", "TOOL", "FP", "MANIFEST", "FIXED"]
-    row = table.splitlines()[1]
+    [row] = _row_lines(table)
     assert "acme-parse@1.2.0" in row
     assert "1.2.4" in row
 
@@ -123,7 +143,8 @@ def test_missing_extra_value_renders_the_columns_missing_placeholder() -> None:
         [finding], schema=_SCA_SCHEMA, short_fingerprints=_fps(finding.fingerprint)
     )
 
-    assert "(none)" in table.splitlines()[1]
+    [row] = _row_lines(table)
+    assert "(none)" in row
 
 
 def test_location_left_truncation_keeps_the_file_name_and_line() -> None:
@@ -138,7 +159,7 @@ def test_location_left_truncation_keeps_the_file_name_and_line() -> None:
         [finding], schema=_SECRETS_SCHEMA, short_fingerprints=_fps(finding.fingerprint)
     )
 
-    row = table.splitlines()[1]
+    [row] = _row_lines(table)
     assert "file.py:42" in row
     assert "..." in row
 
@@ -206,7 +227,7 @@ def test_right_truncation_keeps_the_start_and_appends_an_ellipsis() -> None:
         [finding], schema=long_id_schema, short_fingerprints=_fps(finding.fingerprint)
     )
 
-    row = table.splitlines()[1]
+    [row] = _row_lines(table)
     assert "a-very-..." in row
 
 
@@ -228,11 +249,13 @@ def test_truncation_narrower_than_the_ellipsis_hard_cuts_instead() -> None:
         [finding], schema=left_tiny_schema, short_fingerprints=_fps(finding.fingerprint)
     )
 
-    # Column index 2 is LOCATION (SEVERITY, ID, LOCATION, TOOL, FP); checked
+    # Cell index 2 is LOCATION (SEVERITY, ID, LOCATION, TOOL, FP); checked
     # positionally, not by substring, since the FP column here happens to
     # embed the full path too (`_fps` maps a fingerprint to itself).
-    assert right.splitlines()[1].split()[2] == "de"  # first two chars, hard-cut from the right
-    assert left.splitlines()[1].split()[2] == "py"  # last two chars, hard-cut from the left
+    [right_row] = _row_lines(right)
+    [left_row] = _row_lines(left)
+    assert _cells(right_row)[2] == "de"  # first two chars, hard-cut from the right
+    assert _cells(left_row)[2] == "py"  # last two chars, hard-cut from the left
 
 
 def test_a_none_intermediate_in_a_dotted_path_resolves_to_missing() -> None:
@@ -247,11 +270,54 @@ def test_a_none_intermediate_in_a_dotted_path_resolves_to_missing() -> None:
         [finding], schema=schema, short_fingerprints=_fps(finding.fingerprint)
     )
 
-    assert "(none)" in table.splitlines()[1]
+    [row] = _row_lines(table)
+    assert "(none)" in row
 
 
-def test_empty_findings_renders_only_the_header() -> None:
+def test_empty_findings_renders_the_header_with_no_data_rows() -> None:
     table = render_category_table([], schema=_SECRETS_SCHEMA, short_fingerprints={})
 
-    assert table.splitlines() == [table.splitlines()[0]]
-    assert "LOCATION" in table
+    assert _row_lines(table) == []
+    assert _cells(table.splitlines()[1]) == ["SEVERITY", "ID", "LOCATION", "TOOL", "FP"]
+
+
+# --- ASCII box shape (ADR §7) ------------------------------------------------
+
+
+def test_table_is_bordered_top_and_bottom_with_the_same_border_line() -> None:
+    finding = _secret_finding(severity=Severity.HIGH, rule_id="aws-key", path="src/config.py")
+
+    table = render_category_table(
+        [finding], schema=_SECRETS_SCHEMA, short_fingerprints=_fps(finding.fingerprint)
+    )
+
+    lines = table.splitlines()
+    assert lines[0] == lines[-1]
+    assert lines[0].startswith("+")
+    assert lines[0].endswith("+")
+    assert set(lines[0]) == {"+", "-"}
+
+
+def test_header_is_separated_from_data_rows_by_a_distinct_double_rule() -> None:
+    finding = _secret_finding(severity=Severity.HIGH, rule_id="aws-key", path="src/config.py")
+
+    table = render_category_table(
+        [finding], schema=_SECRETS_SCHEMA, short_fingerprints=_fps(finding.fingerprint)
+    )
+
+    lines = table.splitlines()
+    header_rule = lines[2]
+    assert set(header_rule) == {"+", "="}
+    assert header_rule != lines[0]  # visually distinct from the plain top/bottom border
+
+
+def test_every_row_including_the_last_column_is_bordered_on_both_sides() -> None:
+    finding = _secret_finding(severity=Severity.HIGH, rule_id="aws-key", path="src/config.py")
+
+    table = render_category_table(
+        [finding], schema=_SECRETS_SCHEMA, short_fingerprints=_fps(finding.fingerprint)
+    )
+
+    for line in (table.splitlines()[1], *_row_lines(table)):
+        assert line.startswith("| ")
+        assert line.endswith(" |")

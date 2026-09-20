@@ -994,6 +994,67 @@ detecta entonces, en vez de fallar en silencio.
   categoría que corrió, de qué tabla salió el umbral que se le aplicó — su propia
   `[thresholds.<categoría>]` o el `[thresholds]` por defecto (§8.1).
 
+#### Enmienda (2026-09-20): tabla con bordes ASCII, sin tocar R3 (§7)
+
+La tabla por categoría ya no es texto plano separado por espacios: ahora lleva
+bordes ASCII (`+`, `-`, `=`, `|` — nunca el bloque Unicode de dibujo de cajas,
+`─│┌┐`, por la misma razón de portabilidad de encoding que ya motiva R2/R4:
+sobrevive a un log de CI redirigido, a una herramienta que asume un byte por
+carácter, a un terminal sin fuente Unicode), con una regla `=` distinta bajo la
+cabecera para separarla visualmente del cuerpo. Nada de esto toca el mecanismo
+de determinismo que R3 exige: los anchos siguen derivándose únicamente del
+esquema y de las filas a imprimir, `linceo.core.table` sigue sin importar
+`shutil`, `os` ni `sys` (verificado también ahora en
+`linceo.core.ascii_box`, el módulo nuevo que ambas — la tabla y el banner de
+abajo — comparten para no dibujar dos bordes ligeramente distintos con el
+tiempo), y el truncado por la izquierda sigue conservando nombre de archivo y
+línea exactamente igual. "Nada de rich": una librería de terceros gana su
+lugar adaptándose al terminal en el que corre — justo lo que R3 prohíbe.
+
+#### Enmienda (2026-09-20): banner configurable del reporte (§7, §8.4)
+
+El reporte de consola abre con un banner de una línea — `"linceo"` por
+defecto — declarado en `banner`, una clave plana del documento de política.
+Tres decisiones, con su argumento:
+
+- **Clave gobernada, no local.** A diferencia de
+  `linceo.core.policy.SeverityOverride` (local por diseño, porque es una vía
+  de escape del gate que exige la misma auditoría por entrada que una
+  exclusión, §6), el banner no afecta al gate ni a la evidencia de ningún
+  hallazgo — es identidad de marca que seguridad decide una vez, al año, y
+  que todo pipeline de la organización hereda sin copiar nada, exactamente
+  la motivación que §8.4 ya da para `fail_on`/`[thresholds]`/`[tool_defaults]`.
+  Se une a `_REMOTE_GOVERNED_KEYS`, sin flag de CLI ni variable de entorno —
+  como `[tool_defaults]`, un dato que cambia pocas veces al año no necesita
+  una capa de sobrescritura por invocación.
+- **Límites de contenido, y por qué se comprueban en dos sitios distintos.**
+  Solo ASCII imprimible (0x20–0x7E), como máximo 72 caracteres. Ese único
+  rango excluye `ESC` (0x1B) — lo que efectivamente cierra la puerta a una
+  secuencia de escape ANSI reescribiendo la salida del terminal, nunca una
+  lista negra de secuencias conocidas, que solo cubre las que alguien pensó
+  en enumerar — y excluye salto de línea/retorno de carro de la misma
+  pasada, así que "una sola línea" es consecuencia de "ASCII imprimible", no
+  una regla aparte. Un documento **local** inválido falla como cualquier
+  otro (`ConfigurationError`, código 2). Un documento **remoto** inválido se
+  trata como un fetch fallido (`linceo.core.remote_policy._decode_and_validate`)
+  y degrada a caché o al banner local, con `WARN`, sin romper el pipeline
+  consumidor — deliberadamente más indulgente que el trato que hoy reciben
+  `fail_on`/`[thresholds]` del mismo documento remoto (cuyo valor inválido sí
+  es un fallo duro para quien lo obtiene). La asimetría es intencional: un
+  umbral remoto mal escrito es un error de seguridad que vale la pena
+  conocer de inmediato, al costo de un solo pipeline; un banner remoto mal
+  escrito no tiene ningún costo de seguridad y forzar a toda la
+  organización a fallar por una errata cosmética cambiaría "una línea de
+  texto equivocada" por "todos los pipelines en rojo", sin ninguna
+  seguridad ganada a cambio.
+- **Ausente de JSON y SARIF, a propósito.** Ambos son contratos de datos —
+  JSON sin pérdida "respecto al modelo `Finding` interno", SARIF para que
+  GitHub Code Scanning y el panel de Azure DevOps consuman evidencia
+  nativamente — y ninguno tiene un lugar natural para "cómo se llama el
+  orquestador". Es la misma regla que ya rige `--max-rows`, "exclusivamente
+  una opción de consola", aplicada aquí a un segundo dato puramente de
+  presentación.
+
 ---
 
 ## §8. Diseño del CLI

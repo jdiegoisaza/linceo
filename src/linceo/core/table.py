@@ -1,4 +1,4 @@
-"""Generic, deterministic plain-text rendering of one category's findings table (ADR §7).
+"""Generic, deterministic ASCII-box rendering of one category's findings table (ADR §7).
 
 One table per category, five base columns fixed here for every category —
 `SEVERITY`, `ID`, `LOCATION`, `TOOL`, `FP` — followed by whatever extra
@@ -10,18 +10,25 @@ only from the schema and the rows being rendered — never from the
 terminal — so the same input always renders to the same bytes (ADR R3):
 this module does not call `shutil.get_terminal_size`, `os.get_terminal_size`,
 or check `isatty` anywhere, and never will.
+
+Bordered with `linceo.core.ascii_box`'s primitives — the same ones
+`linceo.core.banner` uses for the report's banner — rather than the bare
+space-separated columns an earlier revision rendered: a bordered table
+reads as one visual unit at a glance, and the rule under its header
+(`ascii_box.HEADER_RULE_CHAR`) is what makes the header block legible as a
+block, not five more cells that happen to sit above the data.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from linceo.core import ascii_box
 from linceo.core.findings import Finding
 from linceo.core.report_schema import Column, ReportSchema, Truncate
 from linceo.core.severity import SEVERITY_ORDER
 
 _ELLIPSIS = "..."
-_COLUMN_GAP = 2
 
 
 def _resolve_field(finding: Finding, path: str) -> str | None:
@@ -91,13 +98,20 @@ def render_category_table(
     schema: ReportSchema,
     short_fingerprints: Mapping[str, str],
 ) -> str:
-    """Render one category's findings as a fixed-width plain-text table (ADR §7).
+    """Render one category's findings as a bordered, fixed-width ASCII table (ADR §7).
 
     `findings` must already be sorted (`sort_key`) and truncated to the
     console's row limit by the caller — this function renders exactly the
     rows it is given, in the order given, and never touches the terminal.
     `short_fingerprints` must have an entry for every finding's
     `fingerprint` (`linceo.core.fingerprint.short_fingerprints`).
+
+    Shape: a top border, the header row, a header rule
+    (`ascii_box.HEADER_RULE_CHAR`, distinct from the plain borders), every
+    data row with no rule between them, then a bottom border — never one
+    rule per data row, which would double a `--max-rows`-sized table's
+    height for no legibility gain over the one rule that already marks
+    where the header block ends.
     """
     headers = (
         "SEVERITY",
@@ -116,16 +130,9 @@ def render_category_table(
         for i, header in enumerate(headers)
     ]
 
-    lines = [_format_row(headers, widths)]
-    lines.extend(_format_row(row, widths) for row in rows)
+    lines = [ascii_box.border(widths)]
+    lines.append(ascii_box.row(headers, widths))
+    lines.append(ascii_box.border(widths, fill=ascii_box.HEADER_RULE_CHAR))
+    lines.extend(ascii_box.row(row, widths) for row in rows)
+    lines.append(ascii_box.border(widths))
     return "\n".join(lines)
-
-
-def _format_row(cells: Sequence[str], widths: Sequence[int]) -> str:
-    """Left-justify every cell but the last to its column's width, gapped by `_COLUMN_GAP` spaces.
-
-    The last column is never padded, so a rendered line carries no
-    trailing whitespace.
-    """
-    padded = [cell.ljust(width) for cell, width in zip(cells[:-1], widths[:-1], strict=True)]
-    return (" " * _COLUMN_GAP).join([*padded, cells[-1]])
