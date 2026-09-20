@@ -227,6 +227,34 @@ def _status_error(status_code: int) -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(f"{status_code} error", request=request, response=response)
 
 
+def test_status_error_message_is_built_from_status_and_url_never_httpxs_own_str(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact regression this guards: `str(httpx.HTTPStatusError)` includes its own generic
+    "For more information check" link to MDN's HTTP status documentation — noise once this
+    project's own, more specific causes already apply (`_error_hint`), and unhelpful even when
+    none of them do; interpolating it was never buying anything the status code and URL alone
+    do not already say more plainly.
+    """
+    monkeypatch.setenv("SYSTEM_COLLECTIONURI", "https://dev.azure.com/acme/")
+    monkeypatch.setenv("SYSTEM_TEAMPROJECT", "platform")
+
+    def _raising_get(*_args: object, **_kwargs: object) -> _FakeResponse:
+        raise _status_error(404)
+
+    monkeypatch.setattr(httpx, "get", _raising_get)
+    source = AzureDevOpsPolicySource(repository="security-baseline", path="policy.toml")
+
+    with pytest.raises(RemotePolicyFetchError) as exc_info:
+        source.fetch()
+
+    message = str(exc_info.value)
+    assert "developer.mozilla.org" not in message
+    assert "For more information" not in message
+    assert "404 Not Found for" in message
+    assert "security-baseline/items" in message
+
+
 @pytest.mark.parametrize("status_code", [401, 403])
 def test_fetch_names_the_permission_hint_for_the_default_token_env(
     monkeypatch: pytest.MonkeyPatch, status_code: int

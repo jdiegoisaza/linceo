@@ -404,29 +404,41 @@ class AzureDevOpsPolicySource:
         try:
             response = httpx.get(url, params=params, headers=headers, timeout=10.0)
             response.raise_for_status()
-        except httpx.HTTPError as exc:
+        except httpx.HTTPStatusError as exc:
             hint = _error_hint(
-                exc, token_env=self.token_env, repository=self.repository, path=self.path
+                exc.response.status_code,
+                token_env=self.token_env,
+                repository=self.repository,
+                path=self.path,
             )
-            msg = f"failed to fetch {self.repository}/{self.path} from Azure DevOps: {exc}{hint}"
+            msg = (
+                f"failed to fetch {self.repository}/{self.path} from Azure DevOps: "
+                f"{exc.response.status_code} {exc.response.reason_phrase} for {exc.response.url}"
+                f"{hint}"
+            )
+            raise RemotePolicyFetchError(msg) from exc
+        except httpx.HTTPError as exc:
+            # No response at all (a network error, a timeout, ...) — `str(exc)`
+            # is the best information available; there is no status code to
+            # build a more specific message from, and no `_error_hint` for it.
+            msg = f"failed to fetch {self.repository}/{self.path} from Azure DevOps: {exc}"
             raise RemotePolicyFetchError(msg) from exc
 
         return FetchedPolicy(content=response.text)
 
 
-def _error_hint(exc: Exception, *, token_env: str, repository: str, path: str) -> str:
-    """The likely-cause hint appended to an HTTP failure this project can actually explain.
+def _error_hint(status_code: int, *, token_env: str, repository: str, path: str) -> str:
+    """The likely-cause hint appended to an HTTP status this project can actually explain.
 
-    Deliberately narrow — `""` (no hint at all) for anything but the two
-    specific `httpx.HTTPStatusError` codes below, appended to the bare
-    `httpx` error message rather than replacing it either way.
+    Deliberately narrow — `""` (no hint at all) for any status but the two
+    specific cases below. The caller builds the rest of the message from
+    the status code, reason phrase, and requested URL directly rather than
+    `str()`-ing the `httpx.HTTPStatusError` itself, which would otherwise
+    also carry that exception's own generic "for more information" link to
+    MDN's HTTP status documentation — redundant, and actively less useful
+    than the specific causes this project can already name, once one of
+    them applies.
     """
-    import httpx
-
-    if not isinstance(exc, httpx.HTTPStatusError):
-        return ""
-    status_code = exc.response.status_code
-
     if status_code == 404:
         return _not_found_hint(token_env=token_env, repository=repository, path=path)
     if status_code in (401, 403):

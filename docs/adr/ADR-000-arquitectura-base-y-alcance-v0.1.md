@@ -2026,6 +2026,35 @@ etapa `python-build` de la imagen y extraer/`bash -n` el script de la
 plantilla confirmaron, respectivamente, que `[remote-config]` se instala
 de verdad y que el YAML/bash resultante sigue siendo válido.
 
+#### Enmienda (2026-09-19, segunda prueba en pipeline real): el mensaje de 404 seguía citando a MDN
+
+La enmienda anterior añadió las cuatro causas del 404, pero las añadía
+*después* del propio `str(exc)` de `httpx.HTTPStatusError` — y ese `str()`
+ya trae su propio cierre genérico, algo como `"For more information check:
+https://developer.mozilla.org/..."`. El mensaje final citaba un enlace a
+la documentación genérica de códigos HTTP justo antes de las cuatro causas
+concretas — ruido que no le dice nada a quien ya tiene la explicación
+específica delante, y que en cualquier otro caso (un código sin pista
+propia) tampoco aporta nada que el código de estado y la URL no digan ya
+más claro.
+
+**Corrección:** `fetch` separa ahora el manejo de
+`httpx.HTTPStatusError` del de cualquier otro `httpx.HTTPError`. Para el
+primero — el único caso con una respuesta real que citar — el mensaje se
+construye desde `status_code`, `reason_phrase` y la URL efectivamente
+solicitada, nunca desde `str(exc)`: `_error_hint` pasó a recibir el
+código de estado directamente en vez de la excepción completa, quitándole
+además la necesidad de su propio `import httpx`/`isinstance` internos.
+Para el segundo — un error de red o de tiempo de espera, sin respuesta que
+citar — `str(exc)` sigue siendo la mejor información disponible (algo como
+`"Connection refused"` o un timeout), y ahí sí se conserva sin cambios: no
+hay un código de estado del que construir algo más específico.
+
+**Verificación:** `tests/unit/test_azure_devops_policy_source.py::test_status_error_message_is_built_from_status_and_url_never_httpxs_own_str`
+confirma explícitamente que `developer.mozilla.org` y `"For more
+information"` nunca aparecen en el mensaje final, y que este sí incluye el
+código, la frase de razón y la URL construidos por este proyecto.
+
 ### §8.5. Configuración por integración: dos niveles
 
 Hasta esta revisión, `GitleaksIntegration.build_command` construía un argv fijo y no
