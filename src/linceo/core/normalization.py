@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from linceo.core.findings import Category, Finding, RawFinding
-from linceo.core.fingerprint import sca_fingerprint, secret_fingerprint
+from linceo.core.fingerprint import iac_fingerprint, sca_fingerprint, secret_fingerprint
 from linceo.core.severity import Severity, SeveritySource
 from linceo.core.severity_map import CategorySeverityDefault, SeverityMap
 
@@ -168,6 +168,12 @@ def _fingerprint_for(raw: RawFinding) -> str:
             manifest_path=raw.location.path,
         )
 
+    if raw.category is Category.IAC:
+        if raw.resource is None:
+            msg = "an iac RawFinding must set resource to be fingerprinted"
+            raise ValueError(msg)
+        return iac_fingerprint(rule_id=raw.rule_id, path=raw.location.path, resource=raw.resource)
+
     msg = f"no fingerprint algorithm defined for category {raw.category!r}"
     raise ValueError(msg)
 
@@ -187,4 +193,5 @@ def normalize_finding(raw: RawFinding, normalizer: SeverityNormalizer) -> Findin
         severity_source=severity_source,
         package=raw.package,
         secret_hash=raw.secret_hash,
+        resource=raw.resource,
     )

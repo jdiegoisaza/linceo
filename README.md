@@ -34,11 +34,12 @@ ADR's build order for what ships next.
 
 The container image is the unit of compatibility between the orchestrator
 and the exact tool versions it invokes: it bundles pinned, checksum-verified
-builds of Gitleaks and Trivy, plus Trivy's vulnerability database
-pre-fetched at build time, so a scan runs fully offline by default. It also
-installs the `linceo[remote-config]` extra (see "Remote policy" below) —
-being the primary distribution vehicle (ADR R4) is exactly why remote
-policy resolution, a pipeline feature, needs to work out of the box here;
+builds of Gitleaks and Trivy, Checkov in its own isolated environment
+(ADR §10, §8.3), plus Trivy's vulnerability database pre-fetched at build
+time, so a scan runs fully offline by default. It also installs the
+`linceo[remote-config]` extra (see "Remote policy" below) — being the
+primary distribution vehicle (ADR R4) is exactly why remote policy
+resolution, a pipeline feature, needs to work out of the box here;
 `pip install linceo` on its own still gains no HTTP client at all (ADR R2).
 
 Pull a published release — built and pushed by
@@ -48,6 +49,21 @@ authentication needed (see [`docs/RELEASING.md`](docs/RELEASING.md)):
 ```bash
 docker pull ghcr.io/jdiegoisaza/linceo:latest    # or a specific version, e.g. :0.2.0
 ```
+
+**The image is large — about 2.37 GB — because of what R2 (offline by
+default) actually costs, not because of bloat.** Measured breakdown (`docker
+history`, ADR §10 amendment for the full analysis):
+
+| Layer | Size | What it is |
+|---|---|---|
+| Trivy's vulnerability database | 1.4 GB | Baked in at build time so a scan never touches the network (ADR §5). Most of it is OS-package coverage `trivy fs` (the only mode this project uses, ADR §10) never queries — see the ADR amendment for why that isn't easily trimmed. |
+| Checkov's isolated venv | 196 MB | Its graph-analysis engine and AWS IAM-policy checks — used by the frameworks this integration keeps, not bloat from the ones it skips. |
+| Gitleaks + Trivy binaries | 190 MB | The two Go binaries themselves. |
+| `git` (+ its Perl dependency) | ~114 MB | Debian's `git` package hard-depends on Perl; there is no lighter split package. |
+
+Expect that on the first `docker pull`, not a slow subsequent one — it's
+worth knowing before you budget CI cache space or a cold-start pull, not
+after.
 
 Run it against a workspace by mounting it and appending a subcommand —
 exactly as you would to the `linceo` binary itself:

@@ -2,13 +2,15 @@
 
 Mirrors `tests/unit/test_cli_scan_sca.py`'s `FakeToolExecutor` setup for
 trivy's `version --format json` shape; none of these scenarios need a real
-`gitleaks` or `trivy` binary.
+`gitleaks`, `trivy`, or `checkov` binary.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
+from linceo.adapters.checkov import CHECKOV_BINARY
+from linceo.adapters.checkov import SUPPORTED_VERSION_RANGE as CHECKOV_SUPPORTED_VERSION_RANGE
 from linceo.adapters.gitleaks import GITLEAKS_BINARY
 from linceo.adapters.gitleaks import SUPPORTED_VERSION_RANGE as GITLEAKS_SUPPORTED_VERSION_RANGE
 from linceo.adapters.trivy import SUPPORTED_VERSION_RANGE as TRIVY_SUPPORTED_VERSION_RANGE
@@ -23,6 +25,9 @@ _TODAY = date(2026, 9, 17)
 
 _GITLEAKS_VERSION_RESULT = ProcessResult(
     exit_code=0, stdout="8.30.1\n", stderr="", started_at=_NOW, finished_at=_NOW
+)
+_CHECKOV_VERSION_RESULT = ProcessResult(
+    exit_code=0, stdout="3.3.19\n", stderr="", started_at=_NOW, finished_at=_NOW
 )
 
 
@@ -40,17 +45,18 @@ def _trivy_version_result(*, updated_at: str) -> ProcessResult:
     )
 
 
-def test_both_tools_available_and_compatible_are_healthy() -> None:
+def test_all_three_tools_available_and_compatible_are_healthy() -> None:
     executor = FakeToolExecutor(
         recordings={
             ("gitleaks", "version"): _GITLEAKS_VERSION_RESULT,
             ("trivy", "version", "--format", "json"): _trivy_version_result(
                 updated_at="2026-09-14T01:15:36Z"
             ),
+            ("checkov", "--version"): _CHECKOV_VERSION_RESULT,
         }
     )
 
-    gitleaks_status, trivy_status = gather_report(executor, today=_TODAY)
+    gitleaks_status, trivy_status, checkov_status = gather_report(executor, today=_TODAY)
 
     assert gitleaks_status.name == "gitleaks"
     assert gitleaks_status.category is Category.SECRETS
@@ -76,6 +82,16 @@ def test_both_tools_available_and_compatible_are_healthy() -> None:
     assert db_status.age_days == 3
     assert db_status.stale is False
 
+    assert checkov_status.name == "checkov"
+    assert checkov_status.category is Category.IAC
+    assert checkov_status.binary == CHECKOV_BINARY
+    assert checkov_status.available is True
+    assert checkov_status.detected_version == "3.3.19"
+    assert checkov_status.version_supported is True
+    assert checkov_status.supported_range == CHECKOV_SUPPORTED_VERSION_RANGE
+    assert checkov_status.data_sources == ()
+    assert checkov_status.healthy is True
+
 
 def test_a_stale_data_source_is_flagged_but_the_tool_is_still_healthy() -> None:
     """ADR §5: staleness is a WARN, not a hard failure — `healthy` only tracks availability."""
@@ -85,10 +101,11 @@ def test_a_stale_data_source_is_flagged_but_the_tool_is_still_healthy() -> None:
             ("trivy", "version", "--format", "json"): _trivy_version_result(
                 updated_at="2026-09-01T00:00:00Z"
             ),
+            ("checkov", "--version"): _CHECKOV_VERSION_RESULT,
         }
     )
 
-    _, trivy_status = gather_report(executor, today=_TODAY)
+    _, trivy_status, _ = gather_report(executor, today=_TODAY)
 
     [db_status] = trivy_status.data_sources
     assert db_status.age_days == 16
@@ -102,10 +119,11 @@ def test_missing_gitleaks_binary_is_reported_with_its_install_hint() -> None:
             ("trivy", "version", "--format", "json"): _trivy_version_result(
                 updated_at="2026-09-14T01:15:36Z"
             ),
+            ("checkov", "--version"): _CHECKOV_VERSION_RESULT,
         }
     )
 
-    gitleaks_status, _ = gather_report(executor, today=_TODAY)
+    gitleaks_status, _, _ = gather_report(executor, today=_TODAY)
 
     assert gitleaks_status.available is False
     assert gitleaks_status.detected_version is None
@@ -115,15 +133,39 @@ def test_missing_gitleaks_binary_is_reported_with_its_install_hint() -> None:
 
 
 def test_missing_trivy_binary_is_reported_with_its_install_hint() -> None:
-    executor = FakeToolExecutor(recordings={("gitleaks", "version"): _GITLEAKS_VERSION_RESULT})
+    executor = FakeToolExecutor(
+        recordings={
+            ("gitleaks", "version"): _GITLEAKS_VERSION_RESULT,
+            ("checkov", "--version"): _CHECKOV_VERSION_RESULT,
+        }
+    )
 
-    _, trivy_status = gather_report(executor, today=_TODAY)
+    _, trivy_status, _ = gather_report(executor, today=_TODAY)
 
     assert trivy_status.available is False
     assert trivy_status.detected_version is None
     assert trivy_status.data_sources == ()
     assert trivy_status.healthy is False
     assert "install trivy" in (trivy_status.missing_binary_hint or "").lower()
+
+
+def test_missing_checkov_binary_is_reported_with_its_install_hint() -> None:
+    executor = FakeToolExecutor(
+        recordings={
+            ("gitleaks", "version"): _GITLEAKS_VERSION_RESULT,
+            ("trivy", "version", "--format", "json"): _trivy_version_result(
+                updated_at="2026-09-14T01:15:36Z"
+            ),
+        }
+    )
+
+    _, _, checkov_status = gather_report(executor, today=_TODAY)
+
+    assert checkov_status.available is False
+    assert checkov_status.detected_version is None
+    assert checkov_status.data_sources == ()
+    assert checkov_status.healthy is False
+    assert "install checkov" in (checkov_status.missing_binary_hint or "").lower()
 
 
 def test_trivy_version_output_that_cannot_be_parsed_is_treated_as_unavailable() -> None:
@@ -133,10 +175,11 @@ def test_trivy_version_output_that_cannot_be_parsed_is_treated_as_unavailable() 
             ("trivy", "version", "--format", "json"): ProcessResult(
                 exit_code=0, stdout="not json", stderr="", started_at=_NOW, finished_at=_NOW
             ),
+            ("checkov", "--version"): _CHECKOV_VERSION_RESULT,
         }
     )
 
-    _, trivy_status = gather_report(executor, today=_TODAY)
+    _, trivy_status, _ = gather_report(executor, today=_TODAY)
 
     assert trivy_status.available is False
     assert trivy_status.missing_binary_hint is not None
@@ -151,10 +194,11 @@ def test_incompatible_gitleaks_version_is_reported_but_still_available() -> None
             ("trivy", "version", "--format", "json"): _trivy_version_result(
                 updated_at="2026-09-14T01:15:36Z"
             ),
+            ("checkov", "--version"): _CHECKOV_VERSION_RESULT,
         }
     )
 
-    gitleaks_status, _ = gather_report(executor, today=_TODAY)
+    gitleaks_status, _, _ = gather_report(executor, today=_TODAY)
 
     assert gitleaks_status.available is True
     assert gitleaks_status.detected_version == "7.0.0"
@@ -162,13 +206,14 @@ def test_incompatible_gitleaks_version_is_reported_but_still_available() -> None
     assert gitleaks_status.healthy is False
 
 
-def test_render_report_lists_both_tools_and_says_all_are_healthy() -> None:
+def test_render_report_lists_all_three_tools_and_says_all_are_healthy() -> None:
     executor = FakeToolExecutor(
         recordings={
             ("gitleaks", "version"): _GITLEAKS_VERSION_RESULT,
             ("trivy", "version", "--format", "json"): _trivy_version_result(
                 updated_at="2026-09-14T01:15:36Z"
             ),
+            ("checkov", "--version"): _CHECKOV_VERSION_RESULT,
         }
     )
 
@@ -176,8 +221,10 @@ def test_render_report_lists_both_tools_and_says_all_are_healthy() -> None:
 
     assert "gitleaks (secrets):" in report
     assert "trivy (sca):" in report
+    assert "checkov (iac):" in report
     assert "8.30.1" in report
     assert "0.74.0" in report
+    assert "3.3.19" in report
     assert "trivy-vulnerability-db" in report
     assert "All configured tools are available and within their supported range." in report
 

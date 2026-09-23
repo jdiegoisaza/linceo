@@ -89,6 +89,29 @@ def _sca_finding(
     )
 
 
+def _iac_finding(
+    severity: Severity = Severity.MEDIUM,
+    *,
+    rule_id: str = "CKV2_AWS_61",
+    path: str = "main.tf",
+    line: int | None = 1,
+    resource: str = "aws_s3_bucket.logs",
+    fingerprint_suffix: str = "1",
+) -> Finding:
+    return Finding(
+        fingerprint=f"v1:{fingerprint_suffix}{severity.value}{rule_id}{path}{resource}",
+        tool="checkov",
+        category=Category.IAC,
+        rule_id=rule_id,
+        message="Ensure that an S3 bucket has a lifecycle configuration",
+        location=Location(path=path, line=line),
+        severity=severity,
+        raw_severity=None,
+        severity_source=SeveritySource.CATEGORY_DEFAULT,
+        resource=resource,
+    )
+
+
 def _execution(
     *,
     tool: str,
@@ -338,6 +361,42 @@ def test_sca_finding_carries_package_name_version_and_fixed_version_as_propertie
         "package_version": "2.25.0",
         "fixed_version": "2.31.0",
     }
+
+
+def test_iac_finding_carries_the_resource_address_as_a_property() -> None:
+    """ADR §5 amendment, 2026-09-21: SARIF has no first-class field for a cloud/IaC resource."""
+    finding = _iac_finding(resource="aws_s3_bucket.logs")
+    result = _result(
+        (
+            _execution(
+                tool="checkov", tool_version="3.3.19", category=Category.IAC, findings=(finding,)
+            ),
+        )
+    )
+
+    document = json.loads(render_sarif(result))
+
+    _validate(document)
+    [sarif_result] = document["runs"][0]["results"]
+    assert sarif_result["properties"] == {"resource": "aws_s3_bucket.logs"}
+
+
+def test_iac_finding_location_includes_the_resources_starting_line() -> None:
+    finding = _iac_finding(path="modules/storage/main.tf", line=1)
+    result = _result(
+        (
+            _execution(
+                tool="checkov", tool_version="3.3.19", category=Category.IAC, findings=(finding,)
+            ),
+        )
+    )
+
+    document = json.loads(render_sarif(result))
+
+    [sarif_result] = document["runs"][0]["results"]
+    [location] = sarif_result["locations"]
+    assert location["physicalLocation"]["artifactLocation"]["uri"] == "modules/storage/main.tf"
+    assert location["physicalLocation"]["region"] == {"startLine": 1}
 
 
 def test_sca_finding_with_no_fix_available_still_validates() -> None:

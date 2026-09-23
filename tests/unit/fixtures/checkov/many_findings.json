@@ -1,0 +1,49 @@
+[
+  {
+    "check_type": "terraform",
+    "results": {
+      "failed_checks": [
+        {
+          "check_id": "CKV2_AWS_61",
+          "check_name": "Ensure that an S3 bucket has a lifecycle configuration",
+          "file_path": "/subdir/main.tf",
+          "file_line_range": [
+            1,
+            3
+          ],
+          "resource": "aws_s3_bucket.logs",
+          "severity": null
+        },
+        {
+          "check_id": "CKV2_AWS_61",
+          "check_name": "Ensure that an S3 bucket has a lifecycle configuration",
+          "file_path": "/subdir/main.tf",
+          "file_line_range": [
+            5,
+            7
+          ],
+          "resource": "aws_s3_bucket.assets",
+          "severity": null
+        }
+      ]
+    }
+  },
+  {
+    "check_type": "dockerfile",
+    "results": {
+      "failed_checks": [
+        {
+          "check_id": "CKV_DOCKER_8",
+          "check_name": "Ensure the last USER is not root",
+          "file_path": "/Dockerfile",
+          "file_line_range": [
+            2,
+            2
+          ],
+          "resource": "/Dockerfile.USER",
+          "severity": null
+        }
+      ]
+    }
+  }
+]

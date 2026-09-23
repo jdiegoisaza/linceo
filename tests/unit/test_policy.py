@@ -8,7 +8,7 @@ from datetime import date, timedelta
 import pytest
 
 from linceo.core.findings import Category, Finding, Location, Package
-from linceo.core.fingerprint import sca_fingerprint, secret_fingerprint
+from linceo.core.fingerprint import iac_fingerprint, sca_fingerprint, secret_fingerprint
 from linceo.core.policy import (
     Exclusion,
     PolicyConfigurationError,
@@ -807,6 +807,7 @@ def test_exclusion_identity_fields_default_to_none_when_absent() -> None:
     assert exclusion.path is None
     assert exclusion.package is None
     assert exclusion.package_version is None
+    assert exclusion.resource is None
 
 
 def test_exclusion_identity_fields_round_trip_through_parsing() -> None:
@@ -833,6 +834,29 @@ def test_exclusion_identity_fields_round_trip_through_parsing() -> None:
     assert exclusion.path == "requirements.txt"
     assert exclusion.package == "certifi"
     assert exclusion.package_version == "2015.4.28"
+
+
+def test_exclusion_resource_identity_field_round_trips_through_parsing() -> None:
+    """ADR §5 amendment, 2026-09-21: `resource` is `iac`'s own readable identity field."""
+    document = {
+        "exclusions": [
+            {
+                "fingerprint": "v1:abc",
+                "reason": "adoption",
+                "owner": "alice",
+                "expires_at": TODAY,
+                "category": "iac",
+                "rule_id": "CKV2_AWS_61",
+                "path": "main.tf",
+                "resource": "aws_s3_bucket.logs",
+            }
+        ]
+    }
+
+    exclusion = parse_policy_document(document, today=TODAY, max_horizon_days=90).exclusions[0]
+
+    assert exclusion.category is Category.IAC
+    assert exclusion.resource == "aws_s3_bucket.logs"
 
 
 def test_exclusion_unknown_category_is_a_configuration_error() -> None:
@@ -893,6 +917,16 @@ def test_render_exclusions_toml_round_trips_through_parse_policy_document() -> N
             path="requirements.txt",
             package="certifi",
             package_version="2015.4.28",
+        ),
+        Exclusion(
+            fingerprint="v1:ghi",
+            reason="Initial adoption baseline — pending real triage",
+            owner="team-atlas",
+            expires_at=TODAY + timedelta(days=30),
+            category=Category.IAC,
+            rule_id="CKV2_AWS_61",
+            path="main.tf",
+            resource="aws_s3_bucket.logs",
         ),
     )
 
@@ -1144,6 +1178,26 @@ def _sca_finding(
     )
 
 
+def _iac_finding(
+    *,
+    rule_id: str = "CKV2_AWS_61",
+    path: str = "main.tf",
+    resource: str = "aws_s3_bucket.logs",
+) -> Finding:
+    return Finding(
+        fingerprint=iac_fingerprint(rule_id=rule_id, path=path, resource=resource),
+        tool="checkov",
+        category=Category.IAC,
+        rule_id=rule_id,
+        message="Ensure that an S3 bucket has a lifecycle configuration",
+        location=Location(path=path),
+        severity=Severity.MEDIUM,
+        raw_severity=None,
+        severity_source=SeveritySource.CATEGORY_DEFAULT,
+        resource=resource,
+    )
+
+
 def _orphaned_exclusion(
     *,
     fingerprint: str = "v0:deadbeef",
@@ -1152,6 +1206,7 @@ def _orphaned_exclusion(
     path: str | None = "config.py",
     package: str | None = None,
     package_version: str | None = None,
+    resource: str | None = None,
     reason: str = "Initial adoption baseline — pending real triage",
     owner: str = "alice",
     expires_at: date | None = None,
@@ -1169,6 +1224,7 @@ def _orphaned_exclusion(
         path=path,
         package=package,
         package_version=package_version,
+        resource=resource,
     )
 
 
@@ -1332,6 +1388,38 @@ def test_sca_finding_with_a_different_installed_version_does_not_match() -> None
         path="requirements.txt",
         package="certifi",
         package_version="2015.4.28",
+    )
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.migrated == ()
+    assert plan.unresolved == (entry,)
+
+
+def test_iac_identity_matches_on_resource_too() -> None:
+    finding = _iac_finding()
+    entry = _orphaned_exclusion(
+        category=Category.IAC,
+        rule_id="CKV2_AWS_61",
+        path="main.tf",
+        resource="aws_s3_bucket.logs",
+    )
+
+    plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)
+
+    assert plan.migrated[0].migrated.fingerprint == finding.fingerprint
+
+
+def test_iac_finding_with_a_renamed_resource_does_not_match() -> None:
+    """ADR §5 amendment, 2026-09-21: a renamed resource is a genuine identity change — the same
+    treatment `test_sca_finding_with_a_different_installed_version_does_not_match` already
+    establishes for a package version bump, not code movement to reindex through silently."""
+    finding = _iac_finding(resource="aws_s3_bucket.assets")
+    entry = _orphaned_exclusion(
+        category=Category.IAC,
+        rule_id="CKV2_AWS_61",
+        path="main.tf",
+        resource="aws_s3_bucket.logs",
     )
 
     plan = plan_baseline_migration((entry,), (finding,), repository=_REPOSITORY)

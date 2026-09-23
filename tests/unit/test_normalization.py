@@ -52,6 +52,20 @@ def _raw_sca(*, raw_severity: str | None = None, cvss_score: float | None = None
     )
 
 
+def _raw_iac(
+    *, raw_severity: str | None = None, resource: str = "aws_s3_bucket.logs"
+) -> RawFinding:
+    return RawFinding(
+        tool="checkov",
+        category=Category.IAC,
+        rule_id="CKV2_AWS_61",
+        message="Ensure that an S3 bucket has a lifecycle configuration",
+        location=Location(path="main.tf", line=1),
+        raw_severity=raw_severity,
+        resource=resource,
+    )
+
+
 def test_override_wins_over_every_other_signal() -> None:
     normalizer = SeverityNormalizer(
         native_map={("trivy", "HIGH"): Severity.HIGH},
@@ -208,6 +222,43 @@ def test_normalize_finding_rejects_an_sca_raw_finding_without_a_package() -> Non
 
     with pytest.raises(ValueError, match="package"):
         normalize_finding(raw, SeverityNormalizer())
+
+
+def test_normalize_finding_computes_the_iac_fingerprint_and_resolved_severity() -> None:
+    defaults = {Category.IAC: CategorySeverityDefault(default=Severity.MEDIUM)}
+    normalizer = SeverityNormalizer(category_defaults=defaults)
+    raw = _raw_iac()
+
+    finding = normalize_finding(raw, normalizer)
+
+    assert finding.fingerprint.startswith("v1:")
+    assert finding.severity is Severity.MEDIUM
+    assert finding.severity_source is SeveritySource.CATEGORY_DEFAULT
+    assert finding.resource == "aws_s3_bucket.logs"
+
+
+def test_normalize_finding_rejects_an_iac_raw_finding_without_a_resource() -> None:
+    raw = RawFinding(
+        tool="checkov",
+        category=Category.IAC,
+        rule_id="CKV2_AWS_61",
+        message="Ensure that an S3 bucket has a lifecycle configuration",
+        location=Location(path="main.tf"),
+        raw_severity=None,
+    )
+
+    with pytest.raises(ValueError, match="resource"):
+        normalize_finding(raw, SeverityNormalizer())
+
+
+def test_two_resources_in_the_same_file_and_rule_get_different_fingerprints() -> None:
+    """The exact collision `resource` being a fingerprint ingredient prevents (ADR §5 amendment,
+    2026-09-21): without it, these two `RawFinding`s would produce the same fingerprint."""
+    normalizer = SeverityNormalizer()
+    first = normalize_finding(_raw_iac(resource="aws_s3_bucket.logs"), normalizer)
+    second = normalize_finding(_raw_iac(resource="aws_s3_bucket.assets"), normalizer)
+
+    assert first.fingerprint != second.fingerprint
 
 
 def test_bare_normalizer_reports_the_unversioned_map_marker() -> None:

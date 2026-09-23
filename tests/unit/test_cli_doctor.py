@@ -34,6 +34,9 @@ _TRIVY_VERSION_RESULT = ProcessResult(
     started_at=_NOW,
     finished_at=_NOW,
 )
+_CHECKOV_VERSION_RESULT = ProcessResult(
+    exit_code=0, stdout="3.3.19\n", stderr="", started_at=_NOW, finished_at=_NOW
+)
 
 
 def _stub_executor_factory(fake: FakeToolExecutor) -> object:
@@ -50,6 +53,7 @@ def test_doctor_exits_ok_when_every_tool_is_available_and_compatible(
         recordings={
             ("gitleaks", "version"): _GITLEAKS_VERSION_RESULT,
             ("trivy", "version", "--format", "json"): _TRIVY_VERSION_RESULT,
+            ("checkov", "--version"): _CHECKOV_VERSION_RESULT,
         }
     )
     monkeypatch.setattr("linceo.cli.doctor.SubprocessToolExecutor", _stub_executor_factory(fake))
@@ -59,6 +63,7 @@ def test_doctor_exits_ok_when_every_tool_is_available_and_compatible(
     assert result.exit_code == EXIT_OK
     assert "gitleaks (secrets):" in result.output
     assert "trivy (sca):" in result.output
+    assert "checkov (iac):" in result.output
 
 
 def test_doctor_exits_with_tool_execution_failed_when_a_binary_is_missing(

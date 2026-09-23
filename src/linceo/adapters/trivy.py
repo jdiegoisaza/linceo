@@ -290,6 +290,16 @@ class TrivyIntegration:
         """Satisfy `ToolIntegration.missing_binary_hint` with trivy's own actionable text."""
         return TRIVY_MISSING_BINARY_HINT
 
+    def build_env(self) -> Mapping[str, str]:
+        """Satisfy `ToolIntegration.build_env` (ADR §1 amendment): none needed.
+
+        trivy's one offline-by-default requirement (ADR R2) is already a
+        real CLI flag (`--skip-db-update`, always in `build_command`'s own
+        argv), so there is nothing an environment variable needs to do
+        (unlike `linceo.adapters.checkov.CheckovIntegration.build_env`).
+        """
+        return {}
+
     def build_command(self, *, workspace_path: str, config: ToolConfig) -> Sequence[str]:
         """Build the `trivy fs` argv against `workspace_path`, applying `config` (ADR §8.5).
 

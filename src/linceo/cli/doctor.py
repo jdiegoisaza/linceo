@@ -29,6 +29,8 @@ from datetime import UTC, date, datetime
 
 import typer
 
+from linceo.adapters.checkov import CHECKOV_BINARY, CheckovIntegration
+from linceo.adapters.checkov import SUPPORTED_VERSION_RANGE as CHECKOV_SUPPORTED_VERSION_RANGE
 from linceo.adapters.gitleaks import GITLEAKS_BINARY, GitleaksIntegration
 from linceo.adapters.gitleaks import SUPPORTED_VERSION_RANGE as GITLEAKS_SUPPORTED_VERSION_RANGE
 from linceo.adapters.subprocess_executor import SubprocessToolExecutor
@@ -175,13 +177,54 @@ def _probe_trivy(executor: ToolExecutor, *, today: date) -> ToolStatus:
     )
 
 
+def _probe_checkov(executor: ToolExecutor) -> ToolStatus:
+    """Probe checkov: availability, detected version, and range compliance.
+
+    checkov declares no data sources at all (ADR §5; like gitleaks, its
+    detection rules ship baked into the installed package), so
+    `data_sources` is always empty here.
+    """
+    try:
+        version = CheckovIntegration.detect_version(executor)
+    except FileNotFoundError:
+        integration = CheckovIntegration(version="unknown")
+        return ToolStatus(
+            name=integration.name,
+            category=integration.category,
+            binary=CHECKOV_BINARY,
+            supported_range=CHECKOV_SUPPORTED_VERSION_RANGE,
+            available=False,
+            detected_version=None,
+            version_supported=None,
+            missing_binary_hint=integration.missing_binary_hint(),
+            data_sources=(),
+        )
+
+    integration = CheckovIntegration(version=version)
+    return ToolStatus(
+        name=integration.name,
+        category=integration.category,
+        binary=CHECKOV_BINARY,
+        supported_range=CHECKOV_SUPPORTED_VERSION_RANGE,
+        available=True,
+        detected_version=version,
+        version_supported=version_satisfies(version, CHECKOV_SUPPORTED_VERSION_RANGE),
+        missing_binary_hint=None,
+        data_sources=(),
+    )
+
+
 def gather_report(executor: ToolExecutor, *, today: date) -> tuple[ToolStatus, ...]:
     """Probe every reference integration (ADR §10) and return each one's `ToolStatus`.
 
     Reachable from plain Python (AGENTS.md, "CLI framework"): this is the
     entire `doctor` command's logic, with nothing here depending on Typer.
     """
-    return (_probe_gitleaks(executor), _probe_trivy(executor, today=today))
+    return (
+        _probe_gitleaks(executor),
+        _probe_trivy(executor, today=today),
+        _probe_checkov(executor),
+    )
 
 
 def _render_data_source(status: DataSourceStatus) -> str:

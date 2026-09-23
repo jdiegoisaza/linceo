@@ -223,19 +223,25 @@ class Exclusion:
     to those repositories only (ADR §8, "Alcance de las exclusiones") —
     matched against `ExecutionContext.repository`.
 
-    `category`, `rule_id`, `path`, `package`, and `package_version` are the
-    "readable identity fields" ADR §8.2 requires alongside the fingerprint
-    itself: none of them is ever consulted by `apply_exclusions` (matching
-    is by `fingerprint` alone, unchanged) — they exist so a future
-    `baseline migrate`, after a fingerprint algorithm version bump or a
-    tool's `rule_id` rename, can re-resolve which *current* finding an
-    *old* entry meant, instead of the entry becoming unrecoverable the
-    moment its `fingerprint` stops matching anything. All five are `None`
-    for an exclusion nobody generated from a real run — a hand-written
-    entry naming just a known fingerprint remains entirely valid without
-    them. `package`/`package_version` are set only for a `Category.SCA`
-    entry, mirroring `Finding.package`; `path` is the file (`secrets`) or
-    manifest (`sca`) path, mirroring `Finding.location.path`.
+    `category`, `rule_id`, `path`, `package`, `package_version`, and
+    `resource` are the "readable identity fields" ADR §8.2 requires
+    alongside the fingerprint itself: none of them is ever consulted by
+    `apply_exclusions` (matching is by `fingerprint` alone, unchanged) —
+    they exist so a future `baseline migrate`, after a fingerprint
+    algorithm version bump or a tool's `rule_id` rename, can re-resolve
+    which *current* finding an *old* entry meant, instead of the entry
+    becoming unrecoverable the moment its `fingerprint` stops matching
+    anything. All six are `None` for an exclusion nobody generated from a
+    real run — a hand-written entry naming just a known fingerprint
+    remains entirely valid without them. `package`/`package_version` are
+    set only for a `Category.SCA` entry, mirroring `Finding.package`;
+    `resource` is set only for a `Category.IAC` entry, mirroring
+    `Finding.resource` (ADR §5 amendment, 2026-09-21) — a resource rename
+    is expected to leave migration unresolved, the same way a package
+    version bump already does, rather than silently reindexing onto an
+    unrelated resource that happens to share everything else; `path` is
+    the file (`secrets`), manifest (`sca`), or IaC file (`iac`) path,
+    mirroring `Finding.location.path`.
     """
 
     fingerprint: str
@@ -248,6 +254,7 @@ class Exclusion:
     path: str | None = None
     package: str | None = None
     package_version: str | None = None
+    resource: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,7 +523,7 @@ _EXCLUSION_REQUIRED_FIELDS = frozenset({"fingerprint", "reason", "owner", "expir
 #: Optional "readable identity" fields (ADR §8.2) — see `Exclusion`'s own
 #: docstring for what each means and why they exist.
 _EXCLUSION_IDENTITY_FIELDS = frozenset(
-    {"category", "rule_id", "path", "package", "package_version"}
+    {"category", "rule_id", "path", "package", "package_version", "resource"}
 )
 _EXCLUSION_KNOWN_FIELDS = _EXCLUSION_REQUIRED_FIELDS | {"repositories"} | _EXCLUSION_IDENTITY_FIELDS
 _TOOL_SKIP_REQUIRED_FIELDS = frozenset({"tool", "reason", "owner", "expires_at"})
@@ -699,7 +706,7 @@ def _parse_exclusion(
 
     `entry` is already known to be a table — `_as_table_list` guarantees
     that for every item it returns — so this only validates its fields.
-    `category`/`rule_id`/`path`/`package`/`package_version` (ADR §8.2's
+    `category`/`rule_id`/`path`/`package`/`package_version`/`resource` (ADR §8.2's
     "readable identity fields") are all optional: a hand-written exclusion
     naming just a fingerprint is unaffected.
 
@@ -737,6 +744,7 @@ def _parse_exclusion(
         path=_parse_optional_str(entry, field="path"),
         package=_parse_optional_str(entry, field="package"),
         package_version=_parse_optional_str(entry, field="package_version"),
+        resource=_parse_optional_str(entry, field="resource"),
     )
     _validate_horizon(
         exclusion.fingerprint, expires_at, today=today, max_horizon_days=max_horizon_days
@@ -1011,6 +1019,8 @@ def _render_exclusion_block(exclusion: Exclusion) -> str:
         lines.append(f"package = {render_toml_string(exclusion.package)}")
     if exclusion.package_version is not None:
         lines.append(f"package_version = {render_toml_string(exclusion.package_version)}")
+    if exclusion.resource is not None:
+        lines.append(f"resource = {render_toml_string(exclusion.resource)}")
     return "\n".join(lines)
 
 
@@ -1081,9 +1091,10 @@ class ExclusionMigration:
     `original.reason`/`owner`/`expires_at`/`repositories` untouched
     (`dataclasses.replace`) — migrating is not renewing the debt, it is
     keeping it addressed correctly — with a fresh `fingerprint` and
-    `category`/`rule_id`/`path`/`package`/`package_version` refreshed from
-    the finding that matched, so a *second* migration later (say, another
-    `rule_id` rename) still has accurate identity fields to reindex from.
+    `category`/`rule_id`/`path`/`package`/`package_version`/`resource`
+    refreshed from the finding that matched, so a *second* migration later
+    (say, another `rule_id` rename) still has accurate identity fields to
+    reindex from.
     """
 
     original: Exclusion
@@ -1115,21 +1126,27 @@ class MigrationPlan:
     out_of_scope: tuple[Exclusion, ...]
 
 
-_IdentityKey = tuple[Category | None, str | None, str | None, str | None, str | None]
+_IdentityKey = tuple[Category | None, str | None, str | None, str | None, str | None, str | None]
 
 
 def _exclusion_identity_key(entry: Exclusion, *, include_rule_id: bool) -> _IdentityKey:
     """`entry`'s identity as a plain tuple, for equality-matching against a finding's own.
 
     With `include_rule_id=True`, the full identity ADR §8.2 stores
-    (`category`, `rule_id`, `path`, `package`, `package_version`) — this is
-    the tier that recovers a pure fingerprint-version bump, nothing else
-    about the finding having changed. With `include_rule_id=False`, the
-    `rule_id` slot is `None` on both sides of the comparison instead of
-    omitted — same tuple shape either way, `rule_id` just never
-    distinguishes anything in this tier — which additionally recovers a
-    tool renaming its `rule_id` between versions (ADR §5): the same real
-    thing at the same location, just under a new name.
+    (`category`, `rule_id`, `path`, `package`, `package_version`,
+    `resource`) — this is the tier that recovers a pure fingerprint-version
+    bump, nothing else about the finding having changed. With
+    `include_rule_id=False`, the `rule_id` slot is `None` on both sides of
+    the comparison instead of omitted — same tuple shape either way,
+    `rule_id` just never distinguishes anything in this tier — which
+    additionally recovers a tool renaming its `rule_id` between versions
+    (ADR §5): the same real thing at the same location, just under a new
+    name. `resource` (ADR §5 amendment, 2026-09-21) deliberately never gets
+    this same "ignore it" treatment on any tier: unlike `rule_id`, a
+    changed `resource` is not a tool's own naming churn, it is the
+    Terraform author renaming the thing being described — a real identity
+    change this project chooses to treat as "not proven to be the same
+    finding" (ADR §5's `sca` package-version precedent, extended).
     """
     return (
         entry.category,
@@ -1137,6 +1154,7 @@ def _exclusion_identity_key(entry: Exclusion, *, include_rule_id: bool) -> _Iden
         entry.path,
         entry.package,
         entry.package_version,
+        entry.resource,
     )
 
 
@@ -1150,6 +1168,7 @@ def _finding_identity_key(finding: Finding, *, include_rule_id: bool) -> _Identi
         finding.location.path,
         package,
         package_version,
+        finding.resource,
     )
 
 
@@ -1176,10 +1195,10 @@ def _find_unique_identity_match(
 def _reindex_exclusion(entry: Exclusion, finding: Finding) -> Exclusion:
     """Build `entry`'s replacement from the `finding` that matched it (ADR §8.2).
 
-    `category`, `path`, `package`, and `package_version` are always
-    already equal between `entry` and `finding` by construction — both
-    matching tiers in `_find_unique_identity_match` require it — so only
-    `fingerprint` (always, since a migrated entry's old one is by
+    `category`, `path`, `package`, `package_version`, and `resource` are
+    always already equal between `entry` and `finding` by construction —
+    both matching tiers in `_find_unique_identity_match` require it — so
+    only `fingerprint` (always, since a migrated entry's old one is by
     definition not current) and `rule_id` (only when a rename is what the
     second tier recovered) can actually differ from `entry`'s own values.
     """
@@ -1193,6 +1212,7 @@ def _reindex_exclusion(entry: Exclusion, finding: Finding) -> Exclusion:
         path=finding.location.path,
         package=package,
         package_version=package_version,
+        resource=finding.resource,
     )
 
 
@@ -1208,8 +1228,8 @@ def plan_baseline_migration(
     entry's own current fingerprint (so migration can never create a
     second entry pointing at a finding an existing, valid exclusion
     already covers) — first by its full identity
-    (`category`/`rule_id`/`path`/`package`/`package_version`), then, only
-    if that finds nothing, by the same identity without `rule_id` (ADR
+    (`category`/`rule_id`/`path`/`package`/`package_version`/`resource`),
+    then, only if that finds nothing, by the same identity without `rule_id` (ADR
     §5's tool-renames-its-rule_id case). Processed in `exclusions`' own
     order, and a finding is removed from the pool the moment it is
     claimed, so two orphaned entries can never both reindex onto the same

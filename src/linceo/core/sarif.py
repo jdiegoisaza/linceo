@@ -10,7 +10,9 @@ format with controlled, documented loss for the `sca` case (ADR §7). The
 loss is absorbed, not silently dropped: an `sca` result carries a
 `properties` extension block with the package's name, installed version,
 and fixed version, and `locations` still points at the manifest that
-declares the dependency.
+declares the dependency. `iac` findings (ADR §5 amendment, 2026-09-21) hit
+the same gap for their own resource address (e.g. `aws_s3_bucket.logs`),
+absorbed into `properties` the same way.
 
 One SARIF `run` per `ToolExecution`, never one `run` for the whole
 `RunResult`: a SARIF `run.tool.driver` names exactly one tool, and
@@ -118,14 +120,15 @@ def _rule_catalog(
 
 
 def _location(finding: Finding) -> dict[str, object]:
-    """One `result.locations[0]` entry: a `secrets` finding's source file, or `sca`'s manifest.
+    """One `result.locations[0]` entry: `secrets`'/`iac`'s source file, or `sca`'s manifest.
 
-    `Finding.location.path` is already the right value for both
-    categories with no category branch needed here — a source file for
-    `secrets`, the manifest path for `sca` (ADR §5; the same field backs
-    the console table's `MANIFEST` column, ADR §7). `region` is added only
+    `Finding.location.path` is already the right value for every category
+    with no category branch needed here — a source file for `secrets` and
+    `iac`, the manifest path for `sca` (ADR §5; the same field backs the
+    console table's `MANIFEST` column, ADR §7). `region` is added only
     when a line number exists at all — `sca` findings never carry one, a
-    manifest scan having no notion of a line to point at.
+    manifest scan having no notion of a line to point at; `iac` findings do
+    (the resource block's own starting line).
     """
     physical_location: dict[str, object] = {
         "artifactLocation": {"uri": finding.location.path},
@@ -139,22 +142,29 @@ def _location(finding: Finding) -> dict[str, object]:
 
 
 def _properties(finding: Finding) -> dict[str, object] | None:
-    """The `sca` extension `properties` block ADR §7 requires — `None` for `secrets`.
+    """The `sca`/`iac` extension `properties` block ADR §7 requires — `None` for `secrets`.
 
     SARIF has no first-class field for a package's name, its installed
     version, or the version that fixes a vulnerability — this is the
     controlled, documented loss this module's own docstring describes:
     `linceo.core.reporters.render_json` is the lossless report; this is
     the interchange format recovering as much of the same fact as its
-    `properties` extension mechanism allows.
+    `properties` extension mechanism allows. `iac` findings (ADR §5
+    amendment, 2026-09-21) hit the same gap for a different reason: SARIF's
+    `physicalLocation` has no field for the specific cloud/IaC resource a
+    finding is about, only a file and an optional line region — `resource`
+    is a fingerprint ingredient for that category (ADR §5), so it would
+    otherwise be entirely invisible in this interchange format.
     """
-    if finding.package is None:
-        return None
-    return {
-        "package_name": finding.package.name,
-        "package_version": finding.package.version,
-        "fixed_version": finding.package.fixed_version,
-    }
+    if finding.package is not None:
+        return {
+            "package_name": finding.package.name,
+            "package_version": finding.package.version,
+            "fixed_version": finding.package.fixed_version,
+        }
+    if finding.resource is not None:
+        return {"resource": finding.resource}
+    return None
 
 
 def _justification(exclusion: Exclusion) -> str:

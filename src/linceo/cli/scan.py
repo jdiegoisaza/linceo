@@ -1,17 +1,17 @@
-"""``linceo scan secrets`` / ``linceo scan sca``: run one tool end to end (ADR §8, §10).
+"""``linceo scan <secrets|sca|iac>``: run one tool end to end (ADR §8, §10).
 
 Translates CLI flags into the domain objects `linceo.core.engine.run`
 already expects, and nothing more (AGENTS.md, "CLI framework") — the exact
 same run is reachable from Python directly, by constructing the same
 objects and calling `run`, without going through Typer at all.
 
-`scan_secrets` (Gitleaks) and `scan_sca` (Trivy) share every step
-downstream of constructing their own `ToolIntegration` instance — resolving
-configuration, merging `ToolConfig`, `--dry-run`, calling `run`, error
-handling, and reporting — through `_run_scan`, so that shared plumbing
-exists exactly once instead of drifting between the two commands now that
-there are two. `_load_resolved_config` also resolves this run's
-`[remote_policy]` declaration, if any, before calling `load_config` (ADR
+`scan_secrets` (Gitleaks), `scan_sca` (Trivy), and `scan_iac` (Checkov)
+share every step downstream of constructing their own `ToolIntegration`
+instance — resolving configuration, merging `ToolConfig`, `--dry-run`,
+calling `run`, error handling, and reporting — through `_run_scan`, so that
+shared plumbing exists exactly once instead of drifting between the
+commands now that there are three. `_load_resolved_config` also resolves
+this run's `[remote_policy]` declaration, if any, before calling `load_config` (ADR
 R2, §8.4) — no CLI flag of its own: the declaration lives entirely in the
 local `.devsecops/config.toml` this same call already resolves.
 """
@@ -25,6 +25,7 @@ from pathlib import Path
 
 import typer
 
+from linceo.adapters.checkov import CheckovIntegration
 from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.adapters.subprocess_executor import SubprocessToolExecutor
 from linceo.adapters.trivy import TrivyIntegration, TrivyOutputError
@@ -137,6 +138,19 @@ def detect_gitleaks_version(executor: ToolExecutor) -> str:
     """
     try:
         return GitleaksIntegration.detect_version(executor)
+    except FileNotFoundError:
+        return "unknown"
+
+
+def detect_checkov_version(executor: ToolExecutor) -> str:
+    """Detect the installed checkov version, or `"unknown"` if its binary is missing.
+
+    Shared by `scan_iac` and `linceo.cli.baseline` (both construct a
+    `CheckovIntegration`) — the same pattern `detect_gitleaks_version`
+    already establishes, for the same reason.
+    """
+    try:
+        return CheckovIntegration.detect_version(executor)
     except FileNotFoundError:
         return "unknown"
 
@@ -521,6 +535,92 @@ def scan_sca(
             db_data_sources=db_data_sources,
             cvss_source_preference=severity_map.cvss_source_preference,
         ),
+        context_provider=context_provider,
+        workspace_path=workspace_path,
+        executor=executor,
+        normalizer=SeverityNormalizer.from_severity_map(severity_map),
+        resolved_config=resolved_config,
+        output_format=output_format,
+        dry_run=dry_run,
+        now=now,
+    )
+
+
+@scan_app.command("iac")
+def scan_iac(
+    path: Path = typer.Option(Path(), "--path", help="Workspace directory to scan."),
+    platform: PlatformOption = typer.Option(
+        PlatformOption.AUTO,
+        "--platform",
+        help=(
+            "CI platform to resolve ExecutionContext from. `auto` detects Azure Pipelines via "
+            "its TF_BUILD sentinel, GitHub Actions via its GITHUB_ACTIONS sentinel, and falls "
+            "back to `local` otherwise (ADR §4 R1, §8) — always overridable explicitly."
+        ),
+    ),
+    fail_on: FailOnOption | None = typer.Option(
+        None,
+        "--fail-on",
+        help=(
+            "Severity threshold that fails the exit code. Given at all, this replaces any "
+            "[thresholds] table declared in the policy file entirely (ADR §8.1)."
+        ),
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.CONSOLE, "--format", help="Report format."
+    ),
+    config: Path | None = typer.Option(
+        None, "--config", help="Explicit configuration file path (ADR R5)."
+    ),
+    continue_on_tool_error: bool | None = typer.Option(
+        None,
+        "--continue-on-tool-error/--no-continue-on-tool-error",
+        help="Do not fail the run over a tool execution failure or incomplete evidence.",
+    ),
+    strict_normalization: bool | None = typer.Option(
+        None,
+        "--strict-normalization/--no-strict-normalization",
+        help="Fail if any finding has no severity signal but the fallback.",
+    ),
+    max_rows: int | None = typer.Option(
+        None,
+        "--max-rows",
+        help="Console table rows shown per category before summarizing the rest (ADR §7).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the command that would run and exit, without scanning anything.",
+    ),
+) -> None:
+    """Scan a workspace for IaC misconfigurations with Checkov and report a single verdict."""
+    workspace_path = str(path.resolve())
+    now = datetime.now(UTC)
+    env = process_environment()
+
+    resolved_config = _load_resolved_config(
+        cli_overrides=_cli_overrides(
+            fail_on=fail_on,
+            continue_on_tool_error=continue_on_tool_error,
+            strict_normalization=strict_normalization,
+            max_rows=max_rows,
+        ),
+        env=env,
+        config_path=config,
+        workspace_path=workspace_path,
+        now=now,
+    )
+    context_provider = resolve_context_provider(
+        platform=platform, workspace_path=workspace_path, env=env
+    )
+
+    executor = SubprocessToolExecutor()
+    checkov_version = detect_checkov_version(executor)
+    severity_map = load_severity_map()
+
+    _run_scan(
+        category=Category.IAC,
+        integration=CheckovIntegration(version=checkov_version),
         context_provider=context_provider,
         workspace_path=workspace_path,
         executor=executor,

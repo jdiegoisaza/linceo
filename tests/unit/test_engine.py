@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -68,6 +68,7 @@ class StaticToolIntegration:
     argv: Sequence[str]
     raw_findings: Sequence[RawFinding] = ()
     sources: Sequence[DataSource] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
 
     def build_command(
         self,
@@ -76,6 +77,9 @@ class StaticToolIntegration:
         config: ToolConfig,  # noqa: ARG002
     ) -> Sequence[str]:
         return self.argv
+
+    def build_env(self) -> Mapping[str, str]:
+        return self.env
 
     def parse_output(self, _result: ProcessResult) -> Sequence[RawFinding]:
         return self.raw_findings
@@ -503,6 +507,37 @@ def test_tool_config_timeout_is_threaded_through_to_the_executor() -> None:
 
     [(_argv, _env, _cwd, timeout)] = executor.calls
     assert timeout == 42.0
+
+
+def test_integrations_own_build_env_is_threaded_through_to_the_executor() -> None:
+    """ADR §1 amendment: `build_env()` exists so a tool can guarantee its own offline default
+    (Checkov's own motivating case) regardless of what the operator's shell has set."""
+    checkov = StaticToolIntegration(
+        name="checkov",
+        version="3.3.19",
+        category=Category.IAC,
+        argv=("checkov", "-d"),
+        env={"CKV_SKIP_PACKAGE_UPDATE_CHECK": "True"},
+    )
+    executor = FakeToolExecutor(recordings={("checkov", "-d"): _process_result()})
+
+    _run(integrations={Category.IAC: checkov}, executor=executor, config=Config())
+
+    [(_argv, env, _cwd, _timeout)] = executor.calls
+    assert env == {"CKV_SKIP_PACKAGE_UPDATE_CHECK": "True"}
+
+
+def test_an_integration_with_no_build_env_of_its_own_gets_an_empty_environment() -> None:
+    """The neutral, unchanged behavior every pre-existing integration keeps (ADR §1 amendment)."""
+    gitleaks = StaticToolIntegration(
+        name="gitleaks", version="8.18.0", category=Category.SECRETS, argv=("gitleaks", "detect")
+    )
+    executor = FakeToolExecutor(recordings={("gitleaks", "detect"): _process_result()})
+
+    _run(integrations={Category.SECRETS: gitleaks}, executor=executor, config=Config())
+
+    [(_argv, env, _cwd, _timeout)] = executor.calls
+    assert env == {}
 
 
 def test_tool_defaults_apply_when_no_per_tool_override_sets_the_field() -> None:

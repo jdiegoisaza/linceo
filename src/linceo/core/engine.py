@@ -39,6 +39,7 @@ def _execute_one(
     executor: ToolExecutor,
     workspace_path: str,
     argv: tuple[str, ...],
+    env: Mapping[str, str],
     normalizer: SeverityNormalizer,
     skip: ToolSkip | None,
     timeout: float | None,
@@ -49,7 +50,10 @@ def _execute_one(
     `build_command` has already been called, and any
     `UnsupportedToolConfigError` it could raise (ADR §8.5) has already had
     its chance to, before this function (or any real subprocess) runs at
-    all. `timeout` is `ToolConfig.timeout` for this tool, enforced here by
+    all. `env` is that same integration's own `build_env()` (ADR §1
+    amendment, 2026-09-21) — `{}` for every integration that does not need
+    one, exactly `ToolExecutor.run`'s own previous, hardcoded behavior.
+    `timeout` is `ToolConfig.timeout` for this tool, enforced here by
     `executor.run` alone — never translated into a flag inside `argv`
     itself (see `ToolConfig.timeout`).
 
@@ -91,7 +95,7 @@ def _execute_one(
         )
 
     try:
-        process_result = executor.run(argv, env={}, cwd=workspace_path, timeout=timeout)
+        process_result = executor.run(argv, env=env, cwd=workspace_path, timeout=timeout)
     except FileNotFoundError:
         return ToolExecution(
             tool=integration.name,
@@ -262,6 +266,7 @@ def run(
             executor=executor,
             workspace_path=context.workspace_path,
             argv=argv_by_category.get(category, ()),
+            env=integration.build_env(),
             normalizer=effective_normalizer,
             skip=skip_by_tool.get(integration.name),
             timeout=tool_configs_by_tool[integration.name].timeout,

@@ -11,6 +11,7 @@ import pytest
 
 from linceo.core.fingerprint import (
     FINGERPRINT_VERSION,
+    iac_fingerprint,
     sca_fingerprint,
     secret_fingerprint,
     short_fingerprints,
@@ -129,6 +130,41 @@ def test_sca_fingerprint_changes_with_any_ingredient() -> None:
         different_manifest,
     }
     assert len(fingerprints) == 5
+
+
+def test_iac_fingerprint_is_versioned() -> None:
+    """The algorithm version travels embedded in the value, per ADR §5."""
+    fingerprint = iac_fingerprint(
+        rule_id="CKV2_AWS_61", path="main.tf", resource="aws_s3_bucket.logs"
+    )
+
+    assert fingerprint.startswith(f"{FINGERPRINT_VERSION}:")
+
+
+def test_iac_fingerprint_is_deterministic() -> None:
+    kwargs = {"rule_id": "CKV2_AWS_61", "path": "main.tf", "resource": "aws_s3_bucket.logs"}
+
+    assert iac_fingerprint(**kwargs) == iac_fingerprint(**kwargs)
+
+
+def test_iac_fingerprint_changes_with_any_ingredient() -> None:
+    """Changing the rule, path, or resource address changes the fingerprint — resource included,
+    unlike `Location.line`, which is deliberately never an ingredient of any category's
+    fingerprint (ADR §5 amendment, 2026-09-21: two resources of the same type, flagged by the
+    same rule, in the same file, must not collide onto one fingerprint)."""
+    baseline = iac_fingerprint(rule_id="CKV2_AWS_61", path="main.tf", resource="aws_s3_bucket.logs")
+    different_rule = iac_fingerprint(
+        rule_id="CKV_AWS_20", path="main.tf", resource="aws_s3_bucket.logs"
+    )
+    different_path = iac_fingerprint(
+        rule_id="CKV2_AWS_61", path="modules/storage/main.tf", resource="aws_s3_bucket.logs"
+    )
+    different_resource = iac_fingerprint(
+        rule_id="CKV2_AWS_61", path="main.tf", resource="aws_s3_bucket.assets"
+    )
+
+    fingerprints = {baseline, different_rule, different_path, different_resource}
+    assert len(fingerprints) == 4
 
 
 # --- short_fingerprints (ADR §7, "FP") -----------------------------------------

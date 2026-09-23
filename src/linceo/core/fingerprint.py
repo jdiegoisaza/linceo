@@ -62,6 +62,28 @@ def sca_fingerprint(
     )
 
 
+def iac_fingerprint(*, rule_id: str, path: str, resource: str) -> str:
+    """Compute the ``iac`` category fingerprint (ADR §5 amendment, 2026-09-21).
+
+    Ingredients: ``rule_id`` (a Checkov check id, e.g. ``CKV_AWS_19``), the
+    repository-relative ``path`` where the resource is declared, and the
+    resource's own address (e.g. ``aws_s3_bucket.logs``). ``resource`` is
+    required, not optional: two distinct resources of the same type,
+    flagged by the same rule, in the same file — an ordinary Terraform
+    file with several similar blocks — would otherwise collide onto one
+    fingerprint, silently dropping one of two genuinely distinct findings
+    during intra-run dedup. Line numbers are excluded, as for every other
+    category (ADR §5): a resource block moving inside its own file must
+    not churn the fingerprint. Renaming the resource itself, however, is
+    not code movement — it changes the finding's identity, the same way a
+    package version bump changes an `sca` finding's identity — and is
+    expected to invalidate a baseline entry pointing at it, recoverable
+    through the same orphaned-entry mechanism ADR §8.2 already provides
+    for a fingerprint version bump or a tool renaming a `rule_id`.
+    """
+    return f"{FINGERPRINT_VERSION}:{_digest(rule_id, path, resource)}"
+
+
 def short_fingerprints(fingerprints: Iterable[str], *, min_length: int = 8) -> dict[str, str]:
     """Compute a display-safe short form of each of ``fingerprints`` (ADR §7, "FP").
 

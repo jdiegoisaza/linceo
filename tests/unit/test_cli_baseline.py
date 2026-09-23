@@ -34,6 +34,7 @@ runner = CliRunner()
 _NOW = datetime(2026, 9, 18, 12, 0, 0, tzinfo=UTC)
 _GITLEAKS_FIXTURES = Path(__file__).parent / "fixtures" / "gitleaks"
 _TRIVY_FIXTURES = Path(__file__).parent / "fixtures" / "trivy"
+_CHECKOV_FIXTURES = Path(__file__).parent / "fixtures" / "checkov"
 
 _GITLEAKS_VERSION_RESULT = ProcessResult(
     exit_code=0, stdout="8.30.1\n", stderr="", started_at=_NOW, finished_at=_NOW
@@ -46,6 +47,9 @@ _TRIVY_VERSION_RESULT = ProcessResult(
     stderr="",
     started_at=_NOW,
     finished_at=_NOW,
+)
+_CHECKOV_VERSION_RESULT = ProcessResult(
+    exit_code=0, stdout="3.3.19\n", stderr="", started_at=_NOW, finished_at=_NOW
 )
 
 
@@ -74,10 +78,17 @@ def _stub_executor_factory(recordings: Mapping[tuple[str, ...], ProcessResult]) 
 
 
 def _findings_recordings(
-    *, gitleaks_fixture: str, trivy_fixture: str
+    *, gitleaks_fixture: str, trivy_fixture: str, checkov_fixture: str = "empty.json"
 ) -> dict[tuple[str, ...], ProcessResult]:
+    """`checkov_fixture` defaults to `empty.json`: every existing scenario here predates the
+    `iac` category (ADR §1 amendment, 2026-09-21) and asserts specific gitleaks/trivy finding
+    counts — an empty checkov result keeps those counts exactly as each test already expects,
+    while still giving `_run_reference_scan`'s third integration real evidence to run against
+    (a run with any `SKIPPED`/`FAILED` execution is `RunStatus.PARTIAL`, which `baseline init`
+    refuses to write from, ADR §5)."""
     gitleaks_stdout = (_GITLEAKS_FIXTURES / gitleaks_fixture).read_text(encoding="utf-8")
     trivy_stdout = (_TRIVY_FIXTURES / trivy_fixture).read_text(encoding="utf-8")
+    checkov_stdout = (_CHECKOV_FIXTURES / checkov_fixture).read_text(encoding="utf-8")
     return {
         ("gitleaks", "version"): _GITLEAKS_VERSION_RESULT,
         ("gitleaks", "detect"): ProcessResult(
@@ -86,6 +97,10 @@ def _findings_recordings(
         ("trivy", "version", "--format", "json"): _TRIVY_VERSION_RESULT,
         ("trivy", "fs"): ProcessResult(
             exit_code=0, stdout=trivy_stdout, stderr="", started_at=_NOW, finished_at=_NOW
+        ),
+        ("checkov", "--version"): _CHECKOV_VERSION_RESULT,
+        ("checkov", "-d"): ProcessResult(
+            exit_code=0, stdout=checkov_stdout, stderr="", started_at=_NOW, finished_at=_NOW
         ),
     }
 

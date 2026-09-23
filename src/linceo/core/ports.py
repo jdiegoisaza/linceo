@@ -170,6 +170,34 @@ class ToolIntegration(Protocol):
         """
         ...
 
+    def build_env(self) -> Mapping[str, str]:
+        """Environment variables this tool's subprocess needs set, merged over the inherited one.
+
+        Added post-v0.1 (ADR §1 amendment, 2026-09-21) — the first two
+        reference integrations never needed this: gitleaks makes no network
+        call at all, and trivy's one offline-by-default requirement
+        (`--skip-db-update`) has a real CLI flag, so both were satisfiable
+        entirely through `build_command`'s own argv. Checkov's own
+        offline-by-default requirement (ADR R2) is not: suppressing its
+        per-invocation PyPI version check has no CLI flag, only an
+        environment variable read at import time
+        (`CKV_SKIP_PACKAGE_UPDATE_CHECK`) — the third integration is what
+        proved `build_command` alone was not a general enough mechanism for
+        "guarantee this tool's offline default, unconditionally, regardless
+        of what the operator's own shell happens to have set" (the same
+        standard `--skip-db-update` already meets for trivy). Returning
+        `{}` (every existing integration's neutral, unchanged behavior) is
+        exactly as valid an implementation as returning a real mapping —
+        this is additive to the port, not a behavior change for anything
+        that does not need it.
+
+        `linceo.core.engine.run` merges this over the inherited process
+        environment (`ToolExecutor.run`'s own `env` parameter), the same
+        way `build_command`'s argv is built once per run, before any tool
+        actually executes.
+        """
+        ...
+
     def build_command(self, *, workspace_path: str, config: ToolConfig) -> Sequence[str]:
         """Build the argv to invoke this tool against `workspace_path`, applying `config`.
 

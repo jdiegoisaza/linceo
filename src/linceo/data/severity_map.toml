@@ -52,6 +52,14 @@ CRITICAL = "critical"
 # two-signal design (native severity *and*, separately, a CVSS score) is
 # exactly the case ADR §6 documents this exclusion for.
 
+[native.checkov]
+# Empty on purpose, the same reason [native.gitleaks] above is: checkov's
+# open-source edition never emits a native severity value at all — every
+# `RawFinding` it produces has `raw_severity = None`. Severity is only
+# populated when a run is connected to the Bridgecrew/Prisma Cloud
+# platform (`--bc-api-key`), which this integration never passes (ADR §5
+# amendment, 2026-09-21).
+
 # Per-category default for a finding with no native or CVSS signal at all
 # (ADR §6, "Herramientas que no emiten severidad nativa"). `rules` escalates
 # one specific `rule_id` above the category's own `default` — e.g. a rule
@@ -76,3 +84,32 @@ default = "high"
 # instead of a category default — unlike a secret, a CVE essentially always
 # carries at least one severity signal in practice, so this project has not
 # needed one yet.
+
+[defaults.iac]
+default = "medium"
+# MEDIUM, not HIGH like [defaults.secrets] above, and the argument is a
+# real difference between the two tools, not an arbitrary choice (ADR §5
+# amendment, 2026-09-21): "a secret was detected" is close to binary in
+# how serious it is — gitleaks' whole ruleset is built to fire on things
+# worth blocking on. Checkov's default ruleset is not: it spans a public
+# S3 bucket or an internet-open security group (genuinely CRITICAL) and a
+# missing resource description or an outdated engine version (genuinely
+# LOW hygiene) in the same flat list of ~1000+ checks, with the open-source
+# edition giving this project no native signal at all to tell them apart
+# (see [native.checkov] above). Defaulting every one of them to HIGH would
+# make `--fail-on HIGH` — this project's own recommended quickstart
+# threshold — block on hygiene findings constantly, training a team to
+# raise the threshold until the category is effectively ignored: the exact
+# failure mode ADR §6 already warns about for the opposite direction
+# (mapping gitleaks to CRITICAL). MEDIUM records every iac finding and
+# blocks nothing by default, leaving genuinely dangerous, well-known check
+# ids to be escalated explicitly below — the honest default when the tool
+# itself cannot tell HIGH from LOW, the same way ADR §6 already calls HIGH
+# the honest default for secrets, just landing on a different rung of the
+# same scale because the two tools hand this project different evidence.
+
+[defaults.iac.rules]
+# Empty today, the same as [defaults.secrets.rules] above — no specific
+# checkov check id has been judged to deserve escalation above the flat
+# default yet. Escalate one here the day that changes, e.g.:
+# CKV_AWS_20 = "critical"  # example: a publicly readable S3 bucket

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from linceo.adapters.checkov import CheckovIntegration
 from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.adapters.trivy import TrivyIntegration
 from linceo.core.findings import Category
@@ -194,7 +195,8 @@ def test_load_severity_map_reads_the_real_packaged_file() -> None:
         ("trivy", "CRITICAL"): Severity.CRITICAL,
     }
     assert severity_map.category_defaults == {
-        Category.SECRETS: CategorySeverityDefault(default=Severity.HIGH, rules={})
+        Category.SECRETS: CategorySeverityDefault(default=Severity.HIGH, rules={}),
+        Category.IAC: CategorySeverityDefault(default=Severity.MEDIUM, rules={}),
     }
 
 
@@ -220,6 +222,9 @@ def test_every_native_domain_value_is_mapped_or_a_documented_exception() -> None
         ).native_severity_domain(),
         TrivyIntegration(version="0.74.0").name: TrivyIntegration(
             version="0.74.0"
+        ).native_severity_domain(),
+        CheckovIntegration(version="3.3.19").name: CheckovIntegration(
+            version="3.3.19"
         ).native_severity_domain(),
     }
 

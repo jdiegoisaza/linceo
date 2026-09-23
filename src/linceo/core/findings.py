@@ -18,15 +18,16 @@ from linceo.core.severity import Severity, SeveritySource
 
 
 class Category(StrEnum):
-    """A finding category, matching the v0.1 reference tool integrations.
+    """A finding category, matching the reference tool integrations (ADR §1, §10).
 
-    `secrets` (Gitleaks) and `sca` (Trivy) are the only categories in
-    scope for v0.1 (ADR §1, §10); a third category is out-of-scope work
-    that would first need its own fingerprint ingredients defined in ADR §5.
+    `secrets` (Gitleaks) and `sca` (Trivy) were the only two v0.1 categories;
+    `iac` (Checkov) is the third, added post-v0.1 (ADR §1 amendment,
+    2026-09-21) with its own fingerprint ingredients defined in ADR §5.
     """
 
     SECRETS = "secrets"
     SCA = "sca"
+    IAC = "iac"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,16 @@ class Location:
     an absolute path never enters this model (ADR §5). `line` and `column`
     are optional, human-oriented positioning only — neither ever
     contributes to a fingerprint (ADR §5).
+
+    Deliberately does **not** carry an `iac` finding's cloud/IaC resource
+    identity (e.g. `aws_s3_bucket.logs`, ADR §5 amendment, 2026-09-21):
+    unlike `line`/`column`, a resource address *is* a fingerprint
+    ingredient for that category (two distinct resources of the same type,
+    flagged by the same rule, in the same file, would otherwise collide
+    onto one fingerprint) — putting it here would break this class's own
+    "never a fingerprint ingredient" guarantee. It travels as `Finding.resource`
+    instead, the same way `sca`'s own fingerprint ingredients beyond
+    `Location.path` travel via `Finding.package`.
     """
 
     path: str
@@ -79,7 +90,10 @@ class RawFinding:
     Carries every field the fingerprint of its category needs
     (`linceo.core.fingerprint`) plus a human-readable `message`, but no
     `fingerprint` field of its own: computing it is the normalization
-    step's responsibility, not the parser's.
+    step's responsibility, not the parser's. `resource` is the `iac`
+    category's own fingerprint ingredient beyond `location.path` and
+    `rule_id` (ADR §5 amendment, 2026-09-21) — a cloud/IaC resource
+    address such as `aws_s3_bucket.logs`, the way `package` is `sca`'s.
     """
 
     tool: str
@@ -91,6 +105,7 @@ class RawFinding:
     cvss_score: float | None = None
     package: Package | None = None
     secret_hash: str | None = None
+    resource: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,8 +131,10 @@ class Finding:
 
     `package` is populated for `Category.SCA` findings and `None`
     otherwise; `secret_hash` is populated for `Category.SECRETS` findings
-    and `None` otherwise — each category populates exactly the fields its
-    own fingerprint ingredients and reporting need.
+    and `None` otherwise; `resource` is populated for `Category.IAC`
+    findings and `None` otherwise (ADR §5 amendment, 2026-09-21) — each
+    category populates exactly the fields its own fingerprint ingredients
+    and reporting need.
     """
 
     fingerprint: str
@@ -131,3 +148,4 @@ class Finding:
     severity_source: SeveritySource
     package: Package | None = None
     secret_hash: str | None = None
+    resource: str | None = None

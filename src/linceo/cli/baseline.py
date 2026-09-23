@@ -38,11 +38,13 @@ from pathlib import Path
 
 import typer
 
+from linceo.adapters.checkov import CheckovIntegration
 from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.adapters.subprocess_executor import SubprocessToolExecutor
 from linceo.adapters.trivy import TrivyIntegration
 from linceo.cli.scan import (
     PlatformOption,
+    detect_checkov_version,
     detect_gitleaks_version,
     detect_trivy,
     package_root,
@@ -152,6 +154,7 @@ def _build_exclusion(
         path=finding.location.path,
         package=finding.package.name if finding.package is not None else None,
         package_version=finding.package.version if finding.package is not None else None,
+        resource=finding.resource,
     )
 
 
@@ -167,19 +170,19 @@ def _run_reference_scan(
     Shared by `gather_baseline` (`baseline init`) and `gather_migration`
     (`baseline migrate`) — both need the same real run over the current
     workspace, under the same policy, before doing anything specific to
-    what each command does with its findings. Both categories run in a
-    single `engine.run` call — `run` already accepts `integrations` as a
+    what each command does with its findings. All three categories run in
+    a single `engine.run` call — `run` already accepts `integrations` as a
     category-keyed mapping of any size; `scan <category>`'s "one category
     per invocation" is a CLI surface constraint (ADR §8.3), not a
     limitation of `run` itself, and both baseline commands genuinely need
-    "el fichero completo" (ADR §8.2) from one real run, not two
+    "el fichero completo" (ADR §8.2) from one real run, not three
     independently triggered ones a caller would have to reconcile by hand.
     One combined `SeverityNormalizer`, built once from the one loaded
-    `severity_map.toml` (ADR §6), covers both tools correctly: its
+    `severity_map.toml` (ADR §6), covers all three tools correctly: its
     `native_map` is keyed by `(tool, raw_severity)`, and that file's own
-    `[native.gitleaks]` table is empty (gitleaks reports no native
-    severity at all), so trivy's own entries are the only ones that ever
-    match.
+    `[native.gitleaks]`/`[native.checkov]` tables are both empty (neither
+    tool reports native severity at all), so trivy's own entries are the
+    only ones that ever match.
 
     Running `resolved_config` as-is (rather than a bare `Config()`) means
     `[tool_defaults]`/`[tools.<name>]` apply exactly as they would to a
@@ -190,6 +193,7 @@ def _run_reference_scan(
     """
     gitleaks_version = detect_gitleaks_version(executor)
     trivy_version, db_data_sources = detect_trivy(executor)
+    checkov_version = detect_checkov_version(executor)
     severity_map = load_severity_map()
 
     return run(
@@ -202,6 +206,7 @@ def _run_reference_scan(
                 db_data_sources=db_data_sources,
                 cvss_source_preference=severity_map.cvss_source_preference,
             ),
+            Category.IAC: CheckovIntegration(version=checkov_version),
         },
         executor=executor,
         normalizer=SeverityNormalizer.from_severity_map(severity_map),

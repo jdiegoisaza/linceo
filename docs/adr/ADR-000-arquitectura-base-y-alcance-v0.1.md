@@ -131,7 +131,7 @@ Cada uno con la razón por la que queda fuera, no solo la lista:
 | UI web | Fuera del criterio "CLI es el producto" (§8); sin servidor que la sirva (R3). |
 | Publicación directa a DefectDojo | Ver nota abajo — se aplaza, no se descarta. |
 | Escaneo de imágenes de contenedor con registries autenticados | Exige credenciales de red; contaminaría el caso de referencia offline (§10). |
-| SonarQube, Checkov, Dependency-Check, Nuclei | Cobertura del stack del mantenedor; quedan fuera del v0.1 explícitamente para no repetir el riesgo de §13.1 (deriva de alcance) antes de validar el contrato con dos herramientas. |
+| SonarQube, Checkov, Dependency-Check, Nuclei | Cobertura del stack del mantenedor; quedan fuera del v0.1 explícitamente para no repetir el riesgo de §13.1 (deriva de alcance) antes de validar el contrato con dos herramientas. **Checkov deja de estar en esta lista el 2026-09-21** — añadido post-v0.1 como integración de referencia de una tercera categoría, `iac` (ver enmienda en §10); SonarQube, Dependency-Check y Nuclei siguen fuera. |
 | Auto-instalación o auto-actualización de binarios de herramienta | Rompería R2 (nunca se descarga nada en runtime) y R4 (la imagen es la unidad de compatibilidad, no un instalador). |
 | Proveedores de GitHub Actions y GitLab CI | El contrato se valida con dos proveedores de máxima distancia entre sí (§10); añadir más plataformas es trabajo de adaptador, no de diseño, y se hace bajo demanda. |
 | Multi-categoría en una sola invocación del CLI (`scan secrets sca`, `--all`) | Ver §8: restricción de superficie deliberada, no del núcleo. |
@@ -643,6 +643,53 @@ entre versiones — ese caso produce entradas huérfanas en un baseline existent
 exactamente igual que una subida de versión del algoritmo de huella, y se trata con el
 mismo mecanismo de recuperación (§8.2).
 
+#### Enmienda (2026-09-21): huella de `iac` — el recurso sí es ingrediente, `Location` no lo absorbe
+
+Tercera categoría, primera vez que el modelo de huella se prueba contra una
+herramienta cuyos hallazgos no se identifican solo por regla y ruta. Un hallazgo de
+Checkov trae archivo y línea, como `secrets`, pero también un recurso de nube/IaC
+(`aws_s3_bucket.logs`) sin equivalente en ninguna de las dos categorías existentes.
+Tres decisiones, con su argumento:
+
+1. **El recurso entra en la huella; `rule_id` + ruta no bastan.** Un archivo Terraform
+   con varios recursos del mismo tipo — el caso ordinario, no el borde — produce el
+   mismo `check_id` repetido sobre el mismo archivo una vez por recurso. Sin el
+   recurso como tercer ingrediente, todos esos hallazgos distintos colapsarían en una
+   sola huella y la deduplicación intra-run (arriba en esta misma sección) borraría en
+   silencio todos menos uno — exactamente la clase de fallo que esa misma sección
+   existe para evitar, aplicada ahora en la dirección contraria: no es que dos
+   herramientas reporten el mismo hecho, es que la misma herramienta reporta hechos
+   genuinamente distintos que un ingrediente insuficiente confundiría en uno solo.
+2. **El recurso no vive en `Location`.** `Location` (núcleo, `linceo.core.findings`)
+   está definida explícitamente como "nunca ingrediente de huella" — `line`/`column`
+   son solo para orientar a un humano. Ampliar `Location` con el recurso rompería esa
+   garantía existente para las dos categorías que ya dependen de ella, o crearía un
+   campo dentro de `Location` que se comporta distinto según la categoría, lo cual es
+   peor. El recurso viaja en cambio como `Finding.resource`, un campo hermano — el
+   mismo patrón que `Finding.package` ya establece para los ingredientes propios de
+   `sca` que tampoco caben en `Location`. `LOCATION` en la tabla de consola sigue
+   siendo `ruta:línea`, igual que `secrets`; el recurso aparece en su propia columna
+   `RESOURCE`, el mismo papel que `MANIFEST` ya cumple para `sca` (un ingrediente de
+   huella que de otro modo desaparecería de la tabla, §7).
+3. **Un recurso renombrado sí invalida el baseline — decisión deliberada, no un
+   descuido.** Renombrar `aws_s3_bucket.logs` a `aws_s3_bucket.access_logs` cambia la
+   huella y deja huérfana cualquier exclusión existente. La alternativa — excluir el
+   recurso de la huella para que un renombrado no rompa nada — se descarta por la
+   misma razón que ya se descartó incluir la herramienta en la huella (arriba en esta
+   sección) resuelta en sentido contrario: aquí sí hay una asimetría de consecuencias
+   que favorece incluirlo. Un archivo con nombre de recurso ya es, en Terraform, un
+   identificador que el propio autor del código controla y normalmente no cambia sin
+   querer; cuando lo cambia, está describiendo una entidad distinta desde el punto de
+   vista de quien audita el hallazgo — el mismo argumento que ya sostiene que una
+   subida de versión de paquete en `sca` invalida su huella aunque "la vulnerabilidad
+   conceptual" siga siendo la misma CVE. El costo — una entrada huérfana que exige
+   `baseline migrate` — es exactamente el mismo mecanismo de recuperación que ya
+   cubre una subida de versión del algoritmo de huella o un `rule_id` renombrado entre
+   versiones de herramienta (§8.2), extendido aquí sin caso especial: `resource` es
+   simplemente un quinto campo en la tupla de identidad legible que `Exclusion` ya
+   almacenaba para `sca` (`category`/`rule_id`/`path`/`package`/`package_version`),
+   ahora de seis.
+
 ### Frescura de las fuentes de datos
 
 Tratada como un problema general del núcleo, no como un parche específico para Trivy:
@@ -788,6 +835,34 @@ significa que una fuga real de secreto, con `--fail-on HIGH` (el valor que se
 recomienda en el quickstart, ver §8.1), no bloquea nada. HIGH con posibilidad de
 escalado por regla es el default honesto: bloquea por defecto donde importa, sin
 saturar el nivel más alto de la escala.
+
+#### Enmienda (2026-09-21): default de `iac` (Checkov) — MEDIUM, no HIGH
+
+Checkov en su edición open source es "el mismo caso que Gitleaks" — no emite
+severidad nativa en absoluto (`[native.checkov]` vacío en `severity_map.toml`,
+confirmado contra el binario real 3.3.19: el campo `severity` de cada hallazgo es
+siempre `null` salvo conexión a la plataforma Bridgecrew/Prisma Cloud, que esta
+integración nunca activa por su cuenta). Pero el mismo mecanismo (`default` por
+categoría, escalable por `rule_id`) no produce el mismo valor, y la razón es una
+diferencia real entre las dos herramientas, no una elección arbitraria:
+
+"Se detectó un secreto" es, en la práctica, binario en gravedad — el catálogo de
+reglas de Gitleaks está construido para disparar sobre cosas que merecen bloquear, así
+que HIGH como default plano tiene sentido. El catálogo de checkov no: en el mismo
+listado plano de alrededor de 1000 checks conviven un bucket S3 público o un grupo de
+seguridad abierto a internet (genuinamente CRITICAL) con una descripción de recurso
+ausente o una versión de motor desactualizada (higiene, genuinamente LOW) — y la
+edición open source no da ninguna señal nativa para distinguirlos. Asignar HIGH a
+todo el catálogo, igual que a Gitleaks, haría que `--fail-on HIGH` — el valor que
+este mismo quickstart recomienda — bloqueara constantemente por hallazgos de higiene,
+entrenando al equipo a subir el umbral hasta ignorar la categoría entera: exactamente
+el fallo que este documento ya advierte para la dirección contraria (CRITICAL para
+todo Gitleaks). El default elegido es **MEDIUM**: registra todo hallazgo de `iac`,
+no bloquea nada por defecto, y dejar reglas concretas y conocidas por escalar
+explícitamente vía `[defaults.iac.rules]` — vacío hoy, el mismo estado inicial que
+`[defaults.secrets.rules]` tenía antes de que alguna regla mereciera escalado — sigue
+siendo el mismo mecanismo, aterrizando en un peldaño distinto de la escala porque las
+dos herramientas le entregan a este proyecto evidencia distinta.
 
 ### `UNKNOWN` nunca llega al gate como un nivel propio
 
@@ -2524,6 +2599,158 @@ el escaneo y qué significa `repository`/`commit` en un run local:
   potencialmente distinto y engañoso si alguna vez se derivara del propio subdirectorio
   en lugar del remoto configurado.
 
+### Enmienda (2026-09-21): Checkov — la tercera herramienta, la primera de una tercera categoría
+
+`SonarQube, Checkov, Dependency-Check, Nuclei` figuraban en §1 como explícitamente
+fuera del v0.1, "para no repetir el riesgo de §13.1 (deriva de alcance) antes de
+validar el contrato con dos herramientas". El contrato ya se validó con dos — este
+párrafo registra su primera ampliación real, deliberadamente elegida por el mismo
+criterio de §10 de máxima distancia razonable: Checkov no es SCA (Trivy) ni secretos
+(Gitleaks), no emite severidad nativa (como Gitleaks, pero por un catálogo de riesgo
+heterogéneo, a diferencia de Gitleaks — ver enmienda de §6), y sus hallazgos se
+identifican por un recurso de nube/IaC sin equivalente en ninguna de las dos
+categorías existentes (ver enmienda de §5). Tres puntos donde el contrato no encajó
+sin una decisión real, ninguno resuelto forzando la pieza:
+
+1. **Los límites de categoría también son una superficie de herramienta, no solo de
+   dominio de seguridad.** Checkov trae sus propios escáneres de secretos (framework
+   `secrets`), de SCA (`sca_package`/`sca_image`) y de SAST (`sast*`) además de IaC —
+   dejarlos activos por defecto habría hecho que `scan iac` produjera hallazgos que ya
+   pertenecen a Gitleaks o Trivy, exactamente el riesgo que ya motivó que
+   `TrivyIntegration` pase siempre `--scanners vuln` y nunca el default de trivy
+   (`vuln,secret`, arriba en esta sección). `CheckovIntegration.build_command` pasa
+   siempre `--skip-framework` nombrando esos frameworks explícitamente — la misma
+   razón, un tercer caso.
+2. **Ningún puerto existente tenía un lugar para "esta herramienta necesita una
+   variable de entorno para su comportamiento offline".** Checkov importa, al
+   arrancar su CLI, un módulo que llama a la API JSON de PyPI para avisar de una
+   versión nueva — confirmado contra el código fuente real de la 3.3.19, no supuesto
+   de la documentación — sin ningún flag de línea de comandos equivalente, solo la
+   variable de entorno `CKV_SKIP_PACKAGE_UPDATE_CHECK`. Ni Gitleaks (que no hace
+   ninguna llamada de red) ni Trivy (cuyo único requisito offline, `--skip-db-update`,
+   es un flag real) habían necesitado nunca que una `ToolIntegration` fijara una
+   variable de entorno para su propio subproceso — el puerto (`linceo.core.ports`) no
+   tenía ese método, y `linceo.core.engine._execute_one` invocaba
+   `executor.run(argv, env={}, ...)` con el diccionario vacío escrito literalmente,
+   para toda herramienta, sin excepción. Corregido igual que los cuatro hallazgos del
+   checkpoint de Gitleaks (§1): `ToolIntegration.build_env()` se añade al contrato,
+   `engine.run` construye su propio `env` por categoría exactamente como ya construye
+   `argv`, y `GitleaksIntegration`/`TrivyIntegration` implementan la versión trivial
+   (`{}`) que preserva su comportamiento exacto de antes. Es un cambio al contrato
+   público (ADR §11: `ToolIntegration` tiene la misma garantía de compatibilidad hacia
+   atrás que cualquier otro módulo público) — aditivo, no incompatible en la práctica
+   para el v0.1 (no hay integraciones de terceros publicadas todavía que implementen
+   el `Protocol` sin este método), pero registrado aquí con el mismo rigor que los
+   hallazgos del checkpoint original, no como una nota al margen.
+3. **La instalación en la imagen de referencia exige aislamiento, y el tamaño real se
+   midió, no se estimó.** Checkov es un paquete Python con un árbol de dependencias
+   grande — numpy, networkx, rustworkx, pydantic, entre decenas más — que instalado
+   ocupa **~223MB** (medido contra una instalación real de checkov 3.3.19 con `uv pip
+   install`, no una cifra de catálogo). Ese peso no puede entrar en
+   `/opt/linceo/venv`, el entorno propio de linceo (AGENTS.md §8.3: Typer es la única
+   dependencia de terceros del paquete base) — mezclarlo ahí habría hecho gigante,
+   silenciosamente, un paquete que hoy se instala vía PyPI con cero dependencias de
+   red. El `Dockerfile` gana una etapa nueva, `checkov-build`, que instala checkov en
+   su propio venv (`/opt/linceo/checkov-venv`), copiado al `final` por separado y
+   añadido a `PATH` después del propio venv de linceo — los dos árboles de
+   dependencias nunca se mezclan, ni en disco ni en el orden de resolución de `PATH`.
+   Sin verificación de checksum manual, a diferencia de Gitleaks/Trivy: esos binarios
+   vienen de un release de GitHub sin autenticar, que es exactamente lo que ese
+   checksum manual compensa (ADR R4); checkov se resuelve vía `uv pip install` contra
+   el índice de PyPI, una cadena de confianza ya autenticada y distinta, así que fijar
+   la versión exacta (`checkov==3.3.19`) ya cumple la parte de R4 que aquí aplica
+   ("anclado a una versión específica") sin necesitar el mismo mecanismo.
+
+**Balance del ejercicio**, la pregunta que este párrafo existe para responder: el
+contrato aguantó. Ninguna de las tres piezas exigió rediseñar `Finding`,
+`ToolExecution`, `RunResult` ni el gate — el invariante de aceptación de §1 ("ninguna
+ampliación futura... puede exigir cambiar `RunResult`, la firma del gate ni el
+esquema del reporte") se sostiene también para esta tercera herramienta. Lo que sí
+cedió, de forma acotada y con el mismo patrón que ya usan `Finding.package`/`sca` y
+`Exclusion.package`/`package_version`, fue exactamente la superficie diseñada para
+ceder: un campo hermano nuevo en `Finding`/`RawFinding`/`Exclusion` (`resource`), una
+función de huella nueva (`iac_fingerprint`), una entrada nueva en el mapa de
+severidad, y un método nuevo, aditivo, en `ToolIntegration`. Tres herramientas y tres
+categorías es exactamente el punto en el que un diseño sobreajustado a Gitleaks+Trivy
+se habría notado — y donde se notó fue en `build_env`, no en el modelo de datos
+central, que es la distinción que importa.
+
+### Enmienda (2026-09-23): tamaño de la imagen de referencia — 2.37GB medidos, desglosados
+
+`docker history` sobre la imagen construida con la enmienda anterior reporta **2.37GB**,
+repartidos en cuatro capas: 1.4GB la base de vulnerabilidades de Trivy, 196MB el venv
+aislado de checkov, 190MB los binarios de Gitleaks+Trivy, y 115MB el `apt-get install`
+de `git`/`ca-certificates` en la etapa `final`. Investigado contra el binario real de
+cada herramienta y contra la imagen base real (`python:3.12-slim`), no contra
+documentación ni memoria — los números y el argumento que sigue son verificables
+reproduciendo los mismos comandos.
+
+**El hallazgo central, dicho explícitamente porque no es el que parecía a primera
+vista: el tamaño no es el precio del modo offline (R2). Es el precio de consumir el
+artefacto monolítico de Aqua sin filtrar.** La descarga de red de `trivy-db` es
+116.44 MiB comprimidos — confirmada descargándola de verdad, no el número de una
+release notes — que se descomprimen en un único archivo `bbolt` de 1.4GB. Extraídos
+los strings legibles de ese archivo: contiene tablas de asesorías para **114
+combinaciones distintas de distro/versión de sistema operativo** (Alpine 3.2 a 3.24,
+Debian, Ubuntu, RHEL, CentOS, Amazon Linux, Photon OS, más de una docena de versiones
+de SUSE/openSUSE, Oracle Linux, Alma, Rocky, Wolfi, Chainguard) junto con las tablas de
+ecosistemas de lenguaje (pip, npm, rubygems, maven, cargo, go, etc.) que sí sirven a
+`trivy fs`. Las tablas de sistema operativo son cobertura para `trivy image`/`trivy fs`
+sobre un rootfs de contenedor — exactamente el modo que **§10 ya descartó** al elegir
+`trivy fs` en modo dependencias sobre el escaneo de imágenes ("explícitamente no el
+escaneo de imágenes de contenedor... contaminaría la implementación de referencia...
+con precisamente el caso menos alineado con R2"). Esa decisión, tomada por razones de
+alcance y de superficie de red, tiene como efecto secundario no registrado hasta ahora
+que la imagen carga sin usar la mayoría del contenido de su propia base horneada —
+sin estimarlo con precisión byte a byte (bbolt no expone tamaño por bucket sin
+herramienta propia de Go, ver abajo), la proporción de tablas de SO frente al total de
+identificadores encontrados (114 distros contra la fracción de ~103.000 CVE/~3.600 GHSA
+que corresponde a paquetes de lenguaje) hace evidente que es la mayoría, no una
+minoría, del archivo.
+
+**Tres alternativas reales investigadas y descartadas, cada una con su motivo — ninguna
+aplicada:**
+
+1. **Post-procesar el `.db` en build time, borrando los buckets de SO.** Técnicamente
+   posible, pero exige un binario `bbolt` (herramienta Go) que hoy no existe en ninguna
+   etapa de este `Dockerfile` — añadirlo pesa contra el propio ahorro que se busca — y
+   depende de conocer el esquema interno de bucket de Trivy sin garantía de que no
+   cambie entre versiones del binario. Es exactamente la clase de fragilidad que este
+   proyecto ya evita en otro punto de su propio diseño: los fixtures de prueba se
+   capturan de binarios reales en vez de reconstruirse a mano (§11) precisamente para
+   no divergir en silencio de lo que la herramienta real produce; manipular el formato
+   interno de un archivo que Aqua no documenta como estable rompería ese mismo
+   principio.
+2. **Mantener un mirror propio y filtrado, apuntado vía `--db-repository`.** Compatible
+   con R2 en la letra — se seguiría horneando en build time, sin tocar red en runtime —
+   pero cambia qué se confía como fuente: hoy la imagen usa el artefacto oficial de Aqua
+   sin tocarlo; un mirror propio exige reconstruirlo y republicarlo cada vez que Aqua
+   actualiza el suyo, con el riesgo real de que diverja silenciosamente si ese proceso
+   falla o se olvida — mantenimiento operativo nuevo y permanente para un proyecto de
+   mantenedor único (ADR §13.2 ya identifica esa carga como uno de los tres riesgos de
+   muerte del proyecto). Queda registrado como trabajo aplazado en §14, con su propio
+   disparador de reapertura — no descartado para siempre, descartado *ahora*.
+3. **Cambiar la imagen base final a Alpine/musl, o sustituir el `git` de Debian por una
+   librería Python (ej. `dulwich`) dentro de `LocalContextProvider`.** Ambas reducirían
+   los ~114MB de `git`+Perl (confirmado con `apt-cache depends git`: `Depends: perl`,
+   `Depends: liberror-perl`, sin paquete `git-core` más liviano disponible en el repo de
+   Debian), pero ninguna es un recorte de la misma capa — son cambios de arquitectura.
+   Alpine cambia la compatibilidad glibc de los tres binarios de herramienta que la
+   imagen empaqueta; sustituir `git` por una librería cambia contra qué se valida el
+   proveedor de referencia `local` (§10) sin que nadie lo haya pedido.
+
+**Por qué ninguna se aplica: el ahorro no compensa el cambio de naturaleza del
+proyecto para el caso de uso real.** La imagen está pensada para un agente de CI que la
+cachea — el costo real no es 2.37GB en cada `docker run`, es una descarga inicial y
+pulls subsecuentes con capas sin cambios. Cambiar de qué se confía como fuente de la
+base de datos, o de qué distribución/mecanismo provee `git`, paga un costo de
+mantenimiento y de superficie de confianza permanente por un ahorro que un caché de CI
+ya amortiza. La única acción tomada de esta investigación fue gratuita y sin
+contrapartida: `ca-certificates` ya viene instalado en `python:3.12-slim` (confirmado
+con `dpkg -l` contra la imagen base antes de que el `RUN` de este `Dockerfile` se
+ejecute) — el `apt-get install` de la etapa `final` dejó de nombrarlo explícitamente,
+cero bytes de diferencia, un argumento muerto menos.
+
 ---
 
 ## §11. Estrategia de pruebas: los fakes son permanentes
@@ -2678,3 +2905,4 @@ cueste, en la práctica, un único `docker run` sin instalación previa de nada.
 | Escaneo de imágenes de contenedor en la integración de Trivy (§10) | Que el caso de uso offline-first quede suficientemente probado en producción como para justificar introducir el primer camino con credenciales de red del proyecto. |
 | Obtención remota del documento de política (§8.4) | Un usuario real con más de un repositorio necesitando compartir el mismo documento sin copiarlo a mano — el esquema ya está diseñado para que esta pieza sea plomería, no rediseño. |
 | Sobrescribir o extender `severity_map.toml` (mapa nativo, defaults por categoría/regla) desde el documento de política del cliente (§6, §8.4) — distinto de `[[severity_overrides]]` (tier 1, por `(herramienta, rule_id)`, local y auditado por entrada, cerrado el 2026-09-20) | Un usuario real necesitando ajustar la severidad de un valor nativo o de una regla concreta sin esperar un release de linceo que actualice el fichero empaquetado. |
+| Mirror propio y filtrado de `trivy-db` (sin las ~114 tablas de sistema operativo que `trivy fs` nunca consulta, §10 amendment 2026-09-23), apuntado vía `--db-repository` en vez del artefacto oficial de Aqua sin tocar | Que un usuario real reporte el tamaño de la imagen (2.37GB, 1.4GB de ellos la base de Trivy) como impedimento concreto de adopción — no una optimización especulativa contra un caché de CI que ya amortiza la descarga inicial. |

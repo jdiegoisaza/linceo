@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from linceo.core.execution import DataSource
@@ -118,6 +118,15 @@ class GitleaksIntegration:
     def missing_binary_hint(self) -> str:
         """Satisfy `ToolIntegration.missing_binary_hint` with gitleaks' own actionable text."""
         return GITLEAKS_MISSING_BINARY_HINT
+
+    def build_env(self) -> Mapping[str, str]:
+        """Satisfy `ToolIntegration.build_env` (ADR §1 amendment): none needed.
+
+        gitleaks makes no network call at all by default, so there is
+        nothing for an environment variable to suppress (unlike
+        `linceo.adapters.checkov.CheckovIntegration.build_env`).
+        """
+        return {}
 
     def build_command(self, *, workspace_path: str, config: ToolConfig) -> Sequence[str]:
         """Build the `gitleaks detect` argv against `workspace_path`, applying `config` (ADR §8.5).

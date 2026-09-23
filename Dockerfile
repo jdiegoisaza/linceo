@@ -3,18 +3,23 @@
 # linceo reference container image (ADR §4/R4 — "el contenedor de imagen
 # como vía de distribución principal"). This is the unit of compatibility
 # between the orchestrator and the exact tool versions it invokes: the
-# image, not the operator's own PATH, decides which Gitleaks and Trivy
-# build actually runs.
+# image, not the operator's own PATH, decides which Gitleaks, Trivy, and
+# Checkov build actually runs.
 #
-# Four stages:
-#   1. python-build — builds the linceo wheel with uv and installs it,
+# Five stages:
+#   1. python-build  — builds the linceo wheel with uv and installs it,
 #      with no dev dependencies, into a throwaway venv.
-#   2. tools        — downloads Gitleaks and Trivy, checksum-verifies each
+#   2. checkov-build — installs checkov into its *own* venv, entirely
+#      separate from linceo's own (AGENTS.md §8.3): checkov is a bundled
+#      external tool, like Gitleaks/Trivy, not a linceo dependency — its
+#      ~220MB dependency tree must never enter linceo's installed
+#      environment.
+#   3. tools         — downloads Gitleaks and Trivy, checksum-verifies each
 #      against a value copied from that release's own published checksums
 #      file, then bakes Trivy's vulnerability database in at build time.
-#   3. final        — assembles the three outputs above onto a minimal
-#      Python base, as a non-root user, with nothing left over from either
-#      build stage (no uv, no curl, no build tooling).
+#   4. final         — assembles the outputs of the three stages above onto
+#      a minimal Python base, as a non-root user, with nothing left over
+#      from any build stage (no uv, no curl, no build tooling).
 #
 # Build (from the repository root):
 #
@@ -44,9 +49,11 @@ ARG DEBIAN_BASE_DIGEST=sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6
 # Tool versions this image pins (ADR R4: "anclados a una versión
 # específica") — the exact versions each adapter's `SUPPORTED_VERSION_RANGE`
 # was built and golden-fixture-tested against
-# (src/linceo/adapters/gitleaks.py, src/linceo/adapters/trivy.py).
+# (src/linceo/adapters/gitleaks.py, src/linceo/adapters/trivy.py,
+# src/linceo/adapters/checkov.py).
 ARG GITLEAKS_VERSION=8.30.1
 ARG TRIVY_VERSION=0.74.0
+ARG CHECKOV_VERSION=3.3.19
 ARG UV_VERSION=0.12.15
 
 # Derived from the release tag by CI (.github/workflows/release.yml),
@@ -138,6 +145,37 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION="${LINCEO_VERSION}" \
     && uv pip install --python /opt/linceo/venv/bin/python "${1}[remote-config]"
 
 # ---------------------------------------------------------------------------
+# Stage: checkov-build — install checkov into its *own* venv, entirely
+# separate from `/opt/linceo/venv` above (AGENTS.md §8.3: Typer is the base
+# package's only third-party dependency — checkov's own dependency tree,
+# confirmed against the real 3.3.19 release to unpack to roughly 220MB of
+# site-packages — numpy, networkx, rustworkx, pydantic, and dozens more —
+# must never become part of *linceo's* installed environment, the same way
+# it never becomes a line in this project's own `pyproject.toml`/`uv.lock`).
+# checkov is, architecturally, a bundled external tool exactly like Gitleaks
+# and Trivy (ADR R4) — it just happens to be distributed as a Python
+# package instead of a compiled binary, which is why it needs a build stage
+# of its own instead of a `curl`+checksum step in the `tools` stage below.
+# No manual checksum pin here unlike Gitleaks/Trivy's raw GitHub release
+# tarballs: `uv pip install` resolves and verifies checkov against PyPI's
+# own package index (TLS-fetched, hash-checked against the index metadata)
+# — a different, already-authenticated trust chain, not the unauthenticated
+# download Gitleaks/Trivy's own checksum pinning exists to compensate for
+# (ADR R4). Pinning the exact version string is still the "anclado a una
+# versión específica" part of that same requirement.
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim@${PYTHON_BASE_DIGEST} AS checkov-build
+
+ARG UV_VERSION
+ARG CHECKOV_VERSION
+ENV PIP_NO_CACHE_DIR=1 \
+    UV_PYTHON_DOWNLOADS=never
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+
+RUN uv venv --python python3.12 /opt/linceo/checkov-venv \
+    && uv pip install --python /opt/linceo/checkov-venv/bin/python "checkov==${CHECKOV_VERSION}"
+
+# ---------------------------------------------------------------------------
 # Stage: tools — fetch and checksum-verify the pinned Gitleaks and Trivy
 # binaries (ADR R4: "un binario de seguridad descargado sin verificar es
 # el problema que esta herramienta existe para evitar"), then bake Trivy's
@@ -223,15 +261,16 @@ RUN mkdir -p "${TRIVY_CACHE_DIR}" \
     && ./trivy fs --cache-dir "${TRIVY_CACHE_DIR}" --download-db-only .
 
 # ---------------------------------------------------------------------------
-# Stage: final — the shipped image. No uv, no curl, no compiler: only the
-# venv, the two pinned binaries, the pre-fetched database, and `git`
-# (needed by the `local` context provider, ADR §10, to read the mounted
-# workspace's history).
+# Stage: final — the shipped image. No uv, no curl, no compiler: only
+# linceo's own venv, checkov's separate venv, the two pinned binaries, the
+# pre-fetched database, and `git` (needed by the `local` context provider,
+# ADR §10, to read the mounted workspace's history).
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim@${PYTHON_BASE_DIGEST} AS final
 
 ARG GITLEAKS_VERSION
 ARG TRIVY_VERSION
+ARG CHECKOV_VERSION
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
 ARG LINCEO_VERSION
@@ -255,19 +294,24 @@ LABEL org.opencontainers.image.title="linceo" \
       org.opencontainers.image.source="https://github.com/jdiegoisaza/linceo" \
       dev.linceo.tool.gitleaks.version="${GITLEAKS_VERSION}" \
       dev.linceo.tool.trivy.version="${TRIVY_VERSION}" \
+      dev.linceo.tool.checkov.version="${CHECKOV_VERSION}" \
       dev.linceo.trivy-db.built-at="${BUILD_DATE}"
 
 # `git`: the `local` ContextProvider (ADR §10) shells out to it to resolve
 # repository/commit/branch from the mounted workspace — without it, every
 # run under `--platform local` (the default when nothing Azure-specific is
-# detected, ADR §4 R1) would fail outright. `ca-certificates`: needed only
-# by the two explicit, opt-in escape hatches that do touch the network
-# (`--update-db`, `TRIVY_DB_REPOSITORY`, ADR §5) — never by the offline
-# default path. Not pinning exact apt package versions here either, for
-# the same reason as the `tools` stage above.
+# detected, ADR §4 R1) would fail outright. `ca-certificates` is
+# deliberately *not* installed here, even though it is needed by the two
+# explicit, opt-in escape hatches that do touch the network (`--update-db`,
+# `TRIVY_DB_REPOSITORY`, ADR §5): `python:3.12-slim` already ships it
+# (confirmed against the real base image — `dpkg -l ca-certificates`
+# reports it present before this `RUN` ever executes), so installing it
+# again was a dead argument that cost nothing but read as if this stage
+# were the one providing it. Not pinning exact apt package versions here
+# either, for the same reason as the `tools` stage above.
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
 # Every CI platform mounting a checkout into this image does so as
@@ -289,13 +333,20 @@ RUN groupadd --system --gid 1000 linceo \
     && useradd --system --uid 1000 --gid linceo --home-dir /home/linceo --create-home linceo
 
 COPY --from=python-build /opt/linceo/venv /opt/linceo/venv
+COPY --from=checkov-build /opt/linceo/checkov-venv /opt/linceo/checkov-venv
 COPY --from=tools /tools/gitleaks /tools/trivy /opt/linceo/bin/
 COPY --from=tools /opt/linceo/trivy-cache /opt/linceo/trivy-cache
 
 # Binary names are looked up on PATH, never baked in as an absolute path
-# (see `GITLEAKS_BINARY`/`TRIVY_BINARY`, src/linceo/adapters/*.py) — this
-# is the one place that resolution actually happens for this image.
-ENV PATH="/opt/linceo/venv/bin:/opt/linceo/bin:${PATH}" \
+# (see `GITLEAKS_BINARY`/`TRIVY_BINARY`/`CHECKOV_BINARY`,
+# src/linceo/adapters/*.py) — this is the one place that resolution
+# actually happens for this image. `checkov-venv/bin` is listed after
+# linceo's own `venv/bin` deliberately: linceo's own entry point and
+# interpreter always resolve first, and checkov's isolated venv contributes
+# only the one name (`checkov`) that does not exist in linceo's venv at all
+# — the two environments' dependency trees never merge, on disk or on
+# `PATH` resolution order (AGENTS.md §8.3).
+ENV PATH="/opt/linceo/venv/bin:/opt/linceo/checkov-venv/bin:/opt/linceo/bin:${PATH}" \
     TRIVY_CACHE_DIR=/opt/linceo/trivy-cache
 
 RUN chmod -R a+rX /opt/linceo \

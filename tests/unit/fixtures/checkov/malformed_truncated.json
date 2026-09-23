@@ -1,0 +1,7 @@
+{
+  "check_type": "terraform",
+  "results": {
+    "failed_checks": [
+      {
+        "check_id": "CKV2_AWS_61",
+        "check_name": "Ensure that an S3 bucket has a
