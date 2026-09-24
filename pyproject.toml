@@ -30,7 +30,7 @@ dependencies = [
     # click + typing-extensions, it now depends on typer itself, dragging
     # in rich, shellingham, pygments, markdown-it-py, mdurl, and
     # annotated-doc. 0.21.1 is the last release before that inversion.
-    "typer-slim==0.21.1",
+    "typer-slim==0.24.0",
 ]
 
 # R2: the base package has zero network-client dependencies — remote policy
