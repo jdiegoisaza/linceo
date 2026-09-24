@@ -12,8 +12,9 @@ of it, not a replacement.
 
 ## Status
 
-Pre-release (`0.1.0.dev0`). The engine, both v0.1 reference tool
-integrations (Gitleaks, Trivy), the reference context providers (`local`,
+Pre-release (`0.1.0.dev0`). The engine, all three reference tool
+integrations across all three categories (Gitleaks for `secrets`, Trivy for
+`sca`, Checkov for `iac`), the reference context providers (`local`,
 `azure_devops`, `github_actions`), console/JSON/SARIF reporting, the
 `doctor` command, and the reference container image are in place. See the
 ADR's build order for what ships next.
@@ -27,6 +28,107 @@ ADR's build order for what ships next.
 - The container image is the primary distribution unit; PyPI supports local
   development, bring-your-own tool binaries.
 - No client-specific configuration ever lives in this repository.
+
+> **About the output blocks in this document.** Every one below marked
+> **source:** is not hand-written — it is copied verbatim from a real,
+> captured snippet under
+> [`scripts/e2e-verify/cases/`](scripts/e2e-verify/cases/), the versioned
+> evidence that this file still matches what the real binary produces
+> (`scripts/e2e-verify/README.md`). The day the reporter's format changes,
+> that is where to regenerate the example from — `uv run
+> scripts/e2e-verify/run.py` — never by editing the block here by hand.
+
+## Quickstart
+
+Nothing beyond Docker, against a real repository, in two commands:
+
+```bash
+docker pull ghcr.io/jdiegoisaza/linceo:latest
+docker run --rm -v "$PWD:/workspace" ghcr.io/jdiegoisaza/linceo scan secrets
+```
+
+Real output, against a repository with one real secret finding (**source:**
+[`scripts/e2e-verify/cases/scan-secrets-container-local.md`](scripts/e2e-verify/cases/scan-secrets-container-local.md)):
+
+```
++--------+
+| linceo |
++--------+
+
+Run <RUN_ID> — platform=local repository=workspace commit=<COMMIT>
+Status: completed
+Severity map: v1
+
+Executions:
+  - gitleaks 8.30.1 [secrets]: completed (1 findings)
+
+secrets:
+  +----------+------------------+-------------+----------+-------------+
+  | SEVERITY | ID               | LOCATION    | TOOL     | FP          |
+  +==========+==================+=============+==========+=============+
+  | HIGH     | aws-access-token | config.py:9 | gitleaks | v1:f76ea3ac |
+  +----------+------------------+-------------+----------+-------------+
+
+Suppressed by policy: 0
+Expired exclusions: 0
+
+Severity overrides applied: 0
+
+Gate: not enforced (no thresholds configured). With --fail-on high this run would have failed: secrets: 1 HIGH
+```
+
+`<RUN_ID>` and `<COMMIT>` are placeholders, not literal output — the
+captured snippet normalizes both (they differ on every real run) so its own
+diff, versioned alongside this file, stays meaningful (`scripts/e2e-verify/normalize.py`).
+Everything else above — the table, the columns, the gate verdict line — is
+exactly what a real run prints.
+
+`scan sca` and `scan iac` work the same way — a different tool runs behind
+them (Trivy, Checkov) — but `iac` also adds one column, `RESOURCE`
+(ADR §5 amendment, 2026-09-21: a Terraform resource, not just a file and
+line, is what identifies an iac finding). Real output, one Terraform
+resource with several real misconfigurations (**source:**
+[`scripts/e2e-verify/cases/scan-iac-container-local.md`](scripts/e2e-verify/cases/scan-iac-container-local.md),
+truncated here — the marked rows are cut, nothing else is edited):
+
+```
+iac:
+  +----------+-------------+-----------+---------+-------------+--------------------+
+  | SEVERITY | ID          | LOCATION  | TOOL    | FP          | RESOURCE           |
+  +==========+=============+===========+=========+=============+====================+
+  | MEDIUM   | CKV2_AWS_6  | main.tf:4 | checkov | v1:01ed8bbe | aws_s3_bucket.logs |
+  | MEDIUM   | CKV_AWS_145 | main.tf:4 | checkov | v1:0eccd1a4 | aws_s3_bucket.logs |
+  [... 4 more rows cut — full 7-row table in the source snippet above ...]
+  +----------+-------------+-----------+---------+-------------+--------------------+
+```
+
+Seven findings from one resource, one file, one Terraform block — this is
+also why `iac` is the slowest of the three categories (see below):
+Checkov runs many independent rule checks against every resource it graphs,
+where Gitleaks and Trivy each run one pass over the input.
+
+### What it costs, measured on a real agent
+
+| Step | Measured |
+|---|---|
+| Container startup (fixed cost, `docker run --rm <image> --version`) | ~0.87s |
+| `scan secrets` | ~2.2s |
+| `scan sca` | ~1.5s |
+| `scan iac` | ~10.3s |
+
+Measured on a real Azure Pipelines agent (two separate runs), not a local
+dev machine — the absolute numbers will move with the hardware; the
+relative gap between `iac` and the other two is the number that matters.
+
+**`scan iac` is not slow by accident — it is the real cost of Checkov, and
+it is worth knowing before a pipeline with all three categories in
+parallel ends up waiting on it.** Gitleaks and Trivy are native Go
+binaries with no interpreter to start; Checkov is Python, running from its
+own isolated venv (ADR §10), and its graph-analysis engine
+(`numpy`/`networkx`/`rustworkx`) starts up and builds a graph even for one
+small file. ~5x the other two's cost is the accepted, understood price of
+that architecture, not a regression to chase — see the ADR §10 amendment
+(2026-09-21) for the full accounting of what that venv actually contains.
 
 ## Installation
 
@@ -71,6 +173,7 @@ exactly as you would to the `linceo` binary itself:
 ```bash
 docker run --rm -v "$PWD:/workspace" ghcr.io/jdiegoisaza/linceo scan secrets
 docker run --rm -v "$PWD:/workspace" ghcr.io/jdiegoisaza/linceo scan sca --fail-on high
+docker run --rm -v "$PWD:/workspace" ghcr.io/jdiegoisaza/linceo scan iac
 docker run --rm ghcr.io/jdiegoisaza/linceo doctor
 ```
 
@@ -94,19 +197,44 @@ examples above). Omitting `LINCEO_VERSION` here is expected for a local
 build — it's the release workflow that passes the real one; see
 `docs/RELEASING.md`, "Container image".
 
-Which exact versions of Gitleaks and Trivy — and how old its vulnerability
-database is — a given image carries is queryable two ways, and both
-describe the same pinned reality (see `Dockerfile` and
+Which exact versions of Gitleaks, Trivy, and Checkov — and how old Trivy's
+vulnerability database is — a given image carries is queryable two ways,
+and both describe the same pinned reality (see `Dockerfile` and
 `src/linceo/cli/doctor.py`):
 
 - **Without starting the container:** `docker inspect
   ghcr.io/jdiegoisaza/linceo:latest` (or `linceo:local`, or `skopeo
   inspect` against any pushed image) shows the OCI labels the build
   embeds — `dev.linceo.tool.gitleaks.version`, `dev.linceo.tool.trivy.version`,
-  `dev.linceo.trivy-db.built-at`, plus the standard `org.opencontainers.image.*`
-  set.
-- **From inside it:** `linceo doctor` (see below) — the same command works
-  identically for a `pip install`ed, bring-your-own-tool setup.
+  `dev.linceo.tool.checkov.version`, `dev.linceo.trivy-db.built-at`, plus
+  the standard `org.opencontainers.image.*` set.
+- **From inside it:** `linceo doctor` — the same command works identically
+  for a `pip install`ed, bring-your-own-tool setup. Real output (**source:**
+  [`scripts/e2e-verify/cases/doctor-container.md`](scripts/e2e-verify/cases/doctor-container.md)):
+
+  ```
+  gitleaks (secrets):
+    binary:  gitleaks — found on PATH
+    version: 8.30.1 (supported: >=8.18,<9) — OK
+    data sources: none declared
+
+  trivy (sca):
+    binary:  trivy — found on PATH
+    version: 0.74.0 (supported: >=0.50,<1) — OK
+    data sources:
+      - trivy-vulnerability-db: version 2, built <today-1d> (1 days old) — OK
+
+  checkov (iac):
+    binary:  checkov — found on PATH
+    version: 3.3.19 (supported: >=3.2,<4) — OK
+    data sources: none declared
+
+  All configured tools are available and within their supported range.
+  ```
+
+  (`<today-1d>` stands in for a real calendar date, normalized because it
+  moves with the day the image was built relative to when it's pulled —
+  everything else is verbatim.)
 
 #### Context providers inside the container: which environment variables cross the boundary
 
@@ -198,9 +326,9 @@ its `auto` detection, ADR §4 R1):
 pip install linceo
 ```
 
-Requires Python 3.11 or later. Gitleaks and Trivy are not bundled via
-PyPI — install them yourself and run `linceo doctor` to confirm each one
-is on `PATH`, at a compatible version, and (for Trivy) how old its
+Requires Python 3.11 or later. Gitleaks, Trivy, and Checkov are not bundled
+via PyPI — install them yourself and run `linceo doctor` to confirm each
+one is on `PATH`, at a compatible version, and (for Trivy) how old its
 vulnerability database is; a missing or incompatible tool gets an
 actionable install/upgrade hint printed right there.
 
@@ -262,6 +390,29 @@ named explicitly (repository, path, branch, permissions — see the same
 doc, "Diagnosticando un 404"), never just the bare HTTP status. The bearer
 token itself is never logged,
 cached, or otherwise persisted (ADR §9).
+
+Both fallback paths, captured against a real unreachable Azure DevOps
+endpoint (`--network none`, no PAT): with a cache to fall back to
+(**source:** [`scripts/e2e-verify/cases/remote-policy-degraded-with-cache-container.md`](scripts/e2e-verify/cases/remote-policy-degraded-with-cache-container.md)) —
+
+```
+Remote policy: linceo-policy/.devsecops/policy.toml — WARN: fetch failed (failed to fetch linceo-policy/.devsecops/policy.toml from Azure DevOps: [Errno -3] Temporary failure in name resolution), using a cached copy from <TIMESTAMP> (0 days old) [OK]
+```
+
+— and with none (**source:** [`scripts/e2e-verify/cases/remote-policy-degraded-no-cache-container.md`](scripts/e2e-verify/cases/remote-policy-degraded-no-cache-container.md)):
+
+```
+Remote policy: linceo-policy/.devsecops/policy.toml — WARN: unreachable and no cached copy (failed to fetch linceo-policy/.devsecops/policy.toml from Azure DevOps: [Errno -3] Temporary failure in name resolution); this run's thresholds and tool configuration are the local document alone
+```
+
+Both runs still complete and still gate on whatever thresholds end up in
+effect — a remote policy source degrading is never, on its own, a reason to
+fail the run. The happy-path fetch (a reachable organization, a valid
+token) is exercised by this project's own Azure Pipelines CI against the
+real `linceo-policy` repository rather than by `scripts/e2e-verify/`, which
+deliberately never carries a credential (ADR §9) — so unlike every other
+block on this page, that specific case has no snippet under
+`scripts/e2e-verify/cases/` to link to here.
 
 ### Report banner (ADR §7, §8.4)
 

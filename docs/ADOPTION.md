@@ -10,6 +10,16 @@ La plantilla reutilizable (`azure-pipelines/templates/linceo-scan.yml`) y el
 pipeline de ejemplo completo (`azure-pipelines/examples/two-stage-scan.yml`)
 son el material de referencia para todo lo que sigue.
 
+**Sobre los bloques de salida de este documento:** los de `scan secrets`/`scan
+sca`/`scan iac` y los de política remota degradada vienen de snippets reales,
+capturados y versionados en `scripts/e2e-verify/cases/` (marcados con **fuente:**
+cuando aparecen) — regenéralos corriendo `uv run scripts/e2e-verify/run.py` el día
+que el formato del reporter cambie, nunca editándolos a mano. Los de `baseline
+init`/`baseline migrate` de más abajo son la excepción: ese comando todavía no está
+en la matriz que el script cubre, así que su salida está verificada línea por línea
+contra el código fuente actual (`src/linceo/cli/baseline.py`), no capturada de una
+corrida real — dicho explícitamente para no hacerlos pasar por lo mismo que no son.
+
 ## Las tres etapas
 
 Un mismo mecanismo — el parámetro `blocking` de la plantilla, más el archivo
@@ -41,8 +51,8 @@ con una entrada `[[exclusions]]` por cada hallazgo activo que la corrida de
 observación reportó, y recién entonces cambiar `blocking: true` en la
 plantilla.
 
-`linceo baseline init` (ADR §8.2) hace exactamente esto: corre gitleaks y
-trivy de verdad sobre el estado actual del repositorio, y **añade** una
+`linceo baseline init` (ADR §8.2) hace exactamente esto: corre gitleaks,
+trivy y checkov de verdad sobre el estado actual del repositorio, y **añade** una
 entrada nueva por cada hallazgo activo que todavía no esté cubierto por
 ninguna exclusión existente — no requiere que exista una corrida de
 observación previa, ni copiar fingerprints a mano, ni que el repositorio
@@ -83,10 +93,20 @@ rule_id = "CVE-2023-37920"
 path = "requirements.txt"
 package = "certifi"
 package_version = "2015.4.28"
+
+[[exclusions]]
+fingerprint = "v1:a46c996b8e2f1d90..."
+reason = "Initial adoption baseline — pending real triage"
+owner = "team-atlas"
+expires_at = 2026-11-20
+category = "iac"
+rule_id = "CKV2_AWS_61"
+path = "main.tf"
+resource = "aws_s3_bucket.logs"
 ```
 
-`category`, `rule_id`, `path`, y (para `sca`) `package`/`package_version`
-viajan junto al `fingerprint` — no los escribe una persona, los genera el
+`category`, `rule_id`, `path`, y (para `sca`) `package`/`package_version`,
+o (para `iac`) `resource`, viajan junto al `fingerprint` — no los escribe una persona, los genera el
 comando — porque el ADR (§8.2) los exige para que `linceo baseline migrate`
 (ver más abajo, "Manteniendo el baseline") pueda reindexar cada entrada tras
 una subida de versión del algoritmo de huella o un cambio de `rule_id` en
@@ -260,11 +280,11 @@ Unresolved — no current finding's identity matches theirs. [...]
 plan por completo — solo imprime el resultado, una vez.
 
 **Cómo reindexa.** Para cada entrada cuyo `fingerprint` no está en la
-versión vigente, corre gitleaks y trivy de verdad contra el estado actual
+versión vigente, corre gitleaks, trivy y checkov de verdad contra el estado actual
 del repositorio (el mismo run que usa `baseline init`) y busca, entre los
 hallazgos activos de esa corrida, uno cuya identidad legible coincida —
-primero por identidad completa (`category`, `rule_id`, `path`, y para
-`sca` `package`/`package_version`), y solo si eso no encuentra nada, por
+primero por identidad completa (`category`, `rule_id`, `path`, para
+`sca` `package`/`package_version`, y para `iac` `resource`), y solo si eso no encuentra nada, por
 esa misma identidad sin `rule_id`, que es lo que recupera el caso de
 renombrado. Si más de un hallazgo activo comparte esa identidad reducida
 — dos CVE distintos sobre el mismo paquete y versión, por ejemplo — el
