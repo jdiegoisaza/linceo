@@ -56,3 +56,6 @@ high = 0
 # the scanned workspace root, which is this repository's own root in CI
 # (`.github/workflows/ci.yml`, job "secrets").
 custom_rules_path = ".gitleaks.toml"
+
+[tools.trivy]
+exclude_paths = ["scripts/e2e-verify/fixtures"]
