@@ -1,0 +1,5 @@
+# A real, long-patched PyPI package pinned to a genuinely vulnerable
+# version — CVE-2023-37920, the same package/version tests/unit/fixtures/trivy/
+# already uses. Not a synthetic identifier: a vulnerability id cannot be
+# fabricated the way a fake credential can.
+certifi==2015.4.28

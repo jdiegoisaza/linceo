@@ -1,0 +1,6 @@
+# Raw per-run output: absolute paths, real timestamps, full stdout/stderr —
+# different on every invocation by construction, so keeping it under
+# version control would be permanent diff noise with no informational
+# content (see run.py's own module docstring). cases/*.md is the versioned
+# half — tracked normally, not covered by this file.
+out/

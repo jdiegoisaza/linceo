@@ -2675,6 +2675,46 @@ categorías es exactamente el punto en el que un diseño sobreajustado a Gitleak
 se habría notado — y donde se notó fue en `build_env`, no en el modelo de datos
 central, que es la distinción que importa.
 
+### Enmienda (2026-09-23): un segundo camino de red en Checkov, encontrado solo al correr el binario real
+
+La enmienda del 2026-09-21, punto 3, documentó un camino de red de Checkov (el chequeo
+de versión contra PyPI) y cómo `build_env` lo suprime. Existe un **segundo camino,
+completamente distinto**, que ese análisis no encontró porque se construyó leyendo
+`--help` y el código de `banner.py` — nunca corriendo el binario real bajo condiciones
+que expusieran el problema. Se encontró recién al ejecutar
+`tests/integration/test_checkov_integration.py` (escrito para cerrar el hallazgo
+colateral de esta misma sesión — la ausencia de ese archivo, que
+`tests/integration/README.md` ya exigía) dentro de un sandbox que niega red de verdad:
+el propio `checkov/main.py` llama a `bc_integration.get_platform_run_config()` y a
+`bc_integration.get_prisma_build_policies(...)` de forma **incondicional**, fuera por
+completo de la rama `if self.config.bc_api_key:` que gobierna cualquier otra llamada a
+la plataforma Bridgecrew/Prisma Cloud — así que ambas se ejecutan, e intentan
+alcanzar `api0.prismacloud.io`, en cada invocación, con o sin `--bc-api-key`.
+
+Lo único que lo detiene, confirmado leyendo `platform_integration.py` directamente
+(ambos métodos retornan de inmediato cuando `self.skip_download` es `True`), es
+`--skip-download` — un flag cuyo propio texto de `--help` ("Do not download any data
+from Prisma Cloud to see in the console... Note: it will prevent BC platform IDs from
+being available in Checkov") **lee como si solo importara con una API key
+configurada**, exactamente la lectura que llevó a la enmienda anterior a omitirlo a
+propósito. `CheckovIntegration.build_command` ahora lo incluye siempre, sin
+condición, igual que ya hace con `--skip-framework`.
+
+**La lección que se registra aquí no es solo sobre este flag, es sobre el método.**
+Las tres decisiones de esta integración documentadas hasta ahora (severidad,
+`Location`/recurso, el primer camino de red) se verificaron cada una contra el binario
+real o el código fuente real — nunca contra la documentación de memoria. Esta —
+"¿qué flags hacen falta para que la herramienta no toque la red?" — es precisamente la
+pregunta donde leer `--help` con cuidado *no bastó*: el texto del flag describe su
+efecto ("no descarga datos de Prisma Cloud"), no las condiciones bajo las que ese
+efecto hace falta, y el código fuente contradice directamente la lectura razonable del
+texto. El hallazgo llegó por la vía más cara — una corrida real, bajo sandbox, que lo
+hizo visible como una violación de red concreta — no por una revisión de código más
+cuidadosa que debería haberlo encontrado antes. Se registra así, sin adornarlo, porque
+es la garantía real que este proyecto puede dar sobre el comportamiento offline de un
+binario de terceros: verificado donde se pudo verificar de verdad, no en todos los
+rincones donde una lectura cuidadosa de la documentación parecía suficiente.
+
 ### Enmienda (2026-09-23): tamaño de la imagen de referencia — 2.37GB medidos, desglosados
 
 `docker history` sobre la imagen construida con la enmienda anterior reporta **2.37GB**,

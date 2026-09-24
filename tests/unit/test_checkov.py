@@ -69,6 +69,17 @@ def test_build_command_is_a_list_argv_scanning_workspace_path_with_frameworks_ex
     assert all(isinstance(part, str) for part in argv)
 
 
+def test_skip_download_is_always_included() -> None:
+    """ADR R2: without it, checkov reaches `api0.prismacloud.io` unconditionally, API key or not —
+    found only by running the real integration test under a network-denying sandbox, not from
+    `--help` text alone (see this module's own docstring, point 3)."""
+    integration = CheckovIntegration(version="3.3.19")
+
+    argv = integration.build_command(workspace_path="/workspace/widgets", config=ToolConfig())
+
+    assert "--skip-download" in argv
+
+
 def test_skip_framework_excludes_secrets_and_sca_to_preserve_category_boundaries() -> None:
     """ADR §10's own reasoning for trivy's `--scanners vuln`, applied to checkov's frameworks."""
     integration = CheckovIntegration(version="3.3.19")

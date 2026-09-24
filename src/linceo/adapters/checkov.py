@@ -45,25 +45,49 @@ here rather than silently forced:
    unresolved rather than silently reindexed — the same precedent `sca`'s
    own package-version bump already sets.
 
-3. **Offline default (ADR R2).** Checkov's CLI entry point unconditionally
-   imports `checkov.common.util.banner`, which calls PyPI's JSON API to
-   check for a newer release unless the `CKV_SKIP_PACKAGE_UPDATE_CHECK`
-   environment variable is truthy — confirmed against the real 3.3.19
-   source, not assumed from documentation (there is no CLI flag
-   equivalent). Neither gitleaks nor trivy ever needed a `ToolIntegration`
-   to set an environment variable for its own subprocess: gitleaks makes no
-   network call at all, and trivy's offline default
-   (`--skip-db-update`) is a real flag. `build_env` below is what a real,
-   general mechanism for this case looks like — added to the
+3. **Offline default (ADR R2) — two separate network paths, not one.** Checkov's
+   CLI entry point unconditionally imports `checkov.common.util.banner`,
+   which calls PyPI's JSON API to check for a newer release unless the
+   `CKV_SKIP_PACKAGE_UPDATE_CHECK` environment variable is truthy —
+   confirmed against the real 3.3.19 source, not assumed from documentation
+   (there is no CLI flag equivalent). Neither gitleaks nor trivy ever
+   needed a `ToolIntegration` to set an environment variable for its own
+   subprocess: gitleaks makes no network call at all, and trivy's offline
+   default (`--skip-db-update`) is a real flag. `build_env` below is what a
+   real, general mechanism for this case looks like — added to the
    `ToolIntegration` contract itself (`linceo.core.ports`, ADR §1
    amendment) rather than solved as a one-off inside this module, since a
    fourth tool with the same shape of requirement should not have to
-   reinvent it either. `--download-external-modules` is, for the same
-   reason, never passed either — confirmed empirically that omitting it
-   already leaves external Terraform module resolution off by default
-   (a warning is logged, no network call is attempted) — and `--bc-api-key`/
-   `--docker-image` are never passed, the same way `TrivyIntegration` never
-   scans an authenticated container registry (ADR §10).
+   reinvent it either.
+
+   A second, entirely separate path was found only by actually running the
+   real integration test against the real binary (`tests/integration/
+   test_checkov_integration.py`) under a network-denying sandbox — reading
+   the `--help` text alone, as the rest of this list was built from, missed
+   it: `checkov/main.py` calls `bc_integration.get_platform_run_config()`
+   and `bc_integration.get_prisma_build_policies(...)` **unconditionally**,
+   entirely outside the `if self.config.bc_api_key:` branch that gates
+   every other Bridgecrew/Prisma Cloud call — so these two run, and attempt
+   to reach `api0.prismacloud.io`, on *every* invocation, with or without
+   `--bc-api-key`. The only thing that stops them (confirmed by reading
+   `checkov/common/bridgecrew/platform_integration.py`: both methods
+   `return` immediately when `self.skip_download` is `True`) is
+   `--skip-download` — despite its own `--help` text reading as if it only
+   mattered "when using an API key" ("Do not download any data from Prisma
+   Cloud... Note: it will prevent BC platform IDs from being available"),
+   which is what led this integration to omit it at first. `build_command`
+   below now passes it unconditionally, the same way `--skip-framework`
+   already is — the lesson generalizes past this one flag: a tool's
+   `--help` text describing a flag's *effect* is not proof of when that
+   effect is *needed*, and the real source (or a real, sandboxed run) is
+   what actually settles it.
+
+   `--download-external-modules` is, separately, never passed either —
+   confirmed empirically that omitting it already leaves external Terraform
+   module resolution off by default (a warning is logged, no network call
+   is attempted) — and `--bc-api-key`/`--docker-image` are never passed,
+   the same way `TrivyIntegration` never scans an authenticated container
+   registry (ADR §10).
 
 `--skip-framework` always excludes `secrets`, `sca_package`, `sca_image`,
 and every `sast*` framework checkov's own `--help` lists — deliberately,
@@ -265,7 +289,13 @@ class CheckovIntegration:
         own `--config`). `config.timeout` is never read here, for the same
         reason neither `GitleaksIntegration.build_command` nor
         `TrivyIntegration.build_command` reads it (see `ToolConfig.timeout`).
-        `config.passthrough` is appended last via `render_passthrough_flags`.
+        `--skip-framework` and `--skip-download` are always included,
+        unconditionally, the same way `--skip-db-update` always is for
+        `TrivyIntegration` — the latter is this module's own offline
+        default (this module's own docstring, point 3): without it,
+        checkov attempts to reach `api0.prismacloud.io` on every
+        invocation, with or without an API key. `config.passthrough` is
+        appended last via `render_passthrough_flags`.
 
         Raises:
             UnsupportedToolConfigError: if `config.scan_history` is not
@@ -290,6 +320,7 @@ class CheckovIntegration:
             "json",
             "--skip-framework",
             ",".join(_EXCLUDED_FRAMEWORKS),
+            "--skip-download",
         ]
         if config.exclude_paths:
             for excluded in config.exclude_paths:

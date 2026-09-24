@@ -19,4 +19,5 @@ useDefault = true
 description = "Synthetic secrets in test fixtures and test code (ADR §11) — not real credentials"
 paths = [
   '''^tests/.*''',
+  '''^scripts/e2e-verify/fixtures/sample-repo/.*''',
 ]

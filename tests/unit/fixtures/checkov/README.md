@@ -79,8 +79,18 @@ unless the `CKV_SKIP_PACKAGE_UPDATE_CHECK` environment variable is truthy; there
 CLI flag equivalent. `CheckovIntegration.build_env` sets it on every invocation this
 integration makes (see `checkov.py`'s module docstring for why this needed a new
 `ToolIntegration.build_env` contract method, ADR §1 amendment). Separately,
-`--download-external-modules` is never passed (confirmed empirically: omitting it
-logs a warning and skips the fetch instead of touching the network, the same offline
-default Terraform module resolution already has without any flag from this
-integration at all), and `--bc-api-key`/`--docker-image` are never passed either,
+A second, separate network path exists that no `--help` text reveals: checkov's own
+`main.py` calls `bc_integration.get_platform_run_config()` and
+`get_prisma_build_policies(...)` unconditionally — outside the `--bc-api-key` check
+entirely — attempting to reach `api0.prismacloud.io` on every invocation, with or
+without a key. Found only by running the real integration test
+(`tests/integration/test_checkov_integration.py`) under a network-denying sandbox, not
+by reading documentation. `--skip-download` is the only thing that stops it (both
+methods `return` immediately when it is set, confirmed by reading
+`platform_integration.py`) — `CheckovIntegration.build_command` now passes it
+unconditionally, the same way it always passes `--skip-framework`.
+`--download-external-modules` is, separately, never passed (confirmed empirically:
+omitting it logs a warning and skips the fetch instead of touching the network, the
+same offline default Terraform module resolution already has without any flag from
+this integration at all), and `--bc-api-key`/`--docker-image` are never passed either,
 for the same reason `TrivyIntegration` never scans authenticated registries (ADR §10).
