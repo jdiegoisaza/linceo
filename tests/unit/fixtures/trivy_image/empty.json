@@ -1,0 +1,5 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "hello-world:latest",
+  "ArtifactType": "container_image"
+}

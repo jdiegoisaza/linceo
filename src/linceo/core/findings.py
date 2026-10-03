@@ -23,11 +23,15 @@ class Category(StrEnum):
     `secrets` (Gitleaks) and `sca` (Trivy) were the only two v0.1 categories;
     `iac` (Checkov) is the third, added post-v0.1 (ADR §1 amendment,
     2026-09-21) with its own fingerprint ingredients defined in ADR §5.
+    `image` (Trivy against a container image in the local daemon) is the
+    fourth: vulnerabilities in the packages *inside* a built image, as
+    opposed to `iac`, which scans the files that describe one.
     """
 
     SECRETS = "secrets"
     SCA = "sca"
     IAC = "iac"
+    IMAGE = "image"
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +43,13 @@ class Location:
     an absolute path never enters this model (ADR §5). `line` and `column`
     are optional, human-oriented positioning only — neither ever
     contributes to a fingerprint (ADR §5).
+
+    `layer` positions an `image` finding the way `line` positions a source
+    finding: the diff ID of the image layer that introduced the package.
+    For `image`, `path` is the package's origin inside the image (a file
+    path, or the package database's type for OS packages) and never
+    contains the image reference — a build tag changes on every build and
+    must not churn fingerprints. `layer` is display data only.
 
     Deliberately does **not** carry an `iac` finding's cloud/IaC resource
     identity (e.g. `aws_s3_bucket.logs`, ADR §5 amendment, 2026-09-21):
@@ -54,6 +65,7 @@ class Location:
     path: str
     line: int | None = None
     column: int | None = None
+    layer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

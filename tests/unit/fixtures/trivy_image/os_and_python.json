@@ -1,0 +1,90 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "78387bc3881b",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Target": "78387bc3881b (debian 13.6)",
+      "Class": "os-pkgs",
+      "Type": "debian",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2011-3374",
+          "PkgName": "apt",
+          "InstalledVersion": "3.0.3",
+          "Layer": {
+            "Digest": "sha256:6310eb16bf4251731feab01e8f633bf5e2d75a657ccad97f420b1f83cce457be",
+            "DiffID": "sha256:411a86676185cb54d695a805b238194a64e9b77e0c723f3802fbb87d333ea0b3"
+          },
+          "Title": "It was found that apt-key in apt, all versions, do not correctly valid ...",
+          "Severity": "LOW",
+          "CVSS": {
+            "nvd": {
+              "V2Vector": "AV:N/AC:M/Au:N/C:N/I:P/A:N",
+              "V3Vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N",
+              "V2Score": 4.3,
+              "V3Score": 3.7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "Target": "Python",
+      "Class": "lang-pkgs",
+      "Type": "python-pkg",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2025-8869",
+          "PkgName": "pip",
+          "InstalledVersion": "25.0.1",
+          "FixedVersion": "25.3",
+          "PkgPath": "usr/local/lib/python3.12/site-packages/pip-25.0.1.dist-info/METADATA",
+          "Layer": {
+            "Digest": "sha256:1560cfed01dc4c72c07f789d860078d74466a1f9a26b33a2e35d887b5f90dd3f",
+            "DiffID": "sha256:3d664d274420a79749a26f9e5115b2120d46037264011773ca4c52e22780b2ca"
+          },
+          "Title": "pip: pip missing checks on symbolic link extraction",
+          "Severity": "MEDIUM",
+          "CVSS": {
+            "ghsa": {
+              "V40Vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:A/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+              "V40Score": 5.9
+            },
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N",
+              "V3Score": 5.3
+            }
+          }
+        },
+        {
+          "VulnerabilityID": "CVE-2026-13346",
+          "PkgName": "pip",
+          "InstalledVersion": "25.0.1",
+          "FixedVersion": "26.2.0",
+          "PkgPath": "usr/local/lib/python3.12/site-packages/pip-25.0.1.dist-info/METADATA",
+          "Layer": {
+            "Digest": "sha256:1560cfed01dc4c72c07f789d860078d74466a1f9a26b33a2e35d887b5f90dd3f",
+            "DiffID": "sha256:3d664d274420a79749a26f9e5115b2120d46037264011773ca4c52e22780b2ca"
+          },
+          "Title": "pip: pip: Arbitrary file installation via malicious package indexes",
+          "Severity": "MEDIUM",
+          "CVSS": {
+            "ghsa": {
+              "V40Vector": "CVSS:4.0/AV:N/AC:H/AT:P/PR:H/UI:A/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+              "V40Score": 5.6
+            },
+            "nvd": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N",
+              "V3Score": 6.5
+            },
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:H/A:L",
+              "V3Score": 5.9
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -2793,6 +2793,28 @@ cero bytes de diferencia, un argumento muerto menos.
 
 ---
 
+### Enmienda (2026-10-02): categoría `image` — Trivy contra una imagen del daemon local
+
+Cuarta categoría (`image`, `linceo scan image <referencia>`): vulnerabilidades en los paquetes *dentro* de una imagen ya construida, de SO y de lenguaje. No es `iac`: Checkov ya cubre los archivos que describen un contenedor (Dockerfile, manifiestos); `image` cubre lo que realmente se construyó. Alcance: solo imágenes presentes en el daemon Docker local; escanear imágenes remotas queda fuera del primer release.
+
+**R2, verificado contra trivy 0.74.0 con un listener en un namespace de red aislado.** `--skip-db-update` no basta:
+
+- Con el `--image-src` por defecto (`docker,containerd,podman,remote`), una imagen ausente del daemon hace que trivy contacte el registro (tres conexiones a `index.docker.io`). Se pasa siempre `--image-src docker`.
+- `trivy` conecta a `check.trivy.dev:443` en cada escaneo. Ni `--skip-version-check` ni `--disable-telemetry` por separado lo evitan (6/6 corridas con conexión); solo el par (0/6). Se pasan ambos.
+- `trivy image` escribe su caché de capas bajo `TRIVY_CACHE_DIR`, de solo lectura para el usuario no-root de la imagen de referencia; se pasa `--cache-backend memory`.
+
+**Hallazgo adyacente, no corregido aquí:** `trivy fs` (categoría `sca`) conecta igualmente a `check.trivy.dev` hoy. Queda pendiente aplicar el mismo par de flags.
+
+**Base de datos.** La base horneada con `--download-db-only` es la base completa: contiene los buckets de SO (alpine, debian, ubuntu, familia RHEL, SUSE, etc.). Verificado escaneando con `--network none` imágenes alpine y debian dentro de la imagen de referencia.
+
+**Huella (§5).** Ingredientes: nombre del paquete, versión instalada, identificador de vulnerabilidad y *origen* dentro de la imagen, más una etiqueta de dominio `image` para no colisionar con `sca`. La referencia de la imagen, el tag y los digests de capa quedan fuera: el tag cambia en cada build y el mismo paquete vulnerable debe conservar su identidad entre builds. El origen es `PkgPath` si trivy lo reporta; si no, el `Target` de un resultado de lenguaje (ya es una ruta); para paquetes de SO, el `Type` (`alpine`, `debian`), porque su `Target` incrusta la referencia de la imagen. El modelo (`Finding`, `Location`, `ReportSchema`, huella) no ramifica por tipo de paquete; solo el parser absorbe la forma desigual de trivy.
+
+**Modelo.** `Location` gana `layer` (diff ID de la capa que introdujo el paquete): posicionamiento humano, nunca ingrediente de huella. Es un cambio aditivo del JSON público (`"layer": null` en todos los hallazgos). La tabla declara `ORIGIN`, `LAYER` y `FIXED` como columnas extra; `LOCATION` es `paquete@versión`, como en `sca`.
+
+**Docker como prerrequisito.** A diferencia de las otras categorías, necesita un daemon accesible (trivy habla con su API; no hace falta el CLI `docker`). El puerto `ToolIntegration` no puede expresar un prerrequisito de entorno distinto de un binario, y añadir un miembro rompería a los plugins de terceros, así que no se modificó: el fallo de conexión al daemon y la imagen inexistente se traducen en `ToolExecutionError` accionables desde `parse_output` (mismo patrón que la base de datos ausente). Consecuencia aceptada: llegan como `FAILED`, no `SKIPPED`, y `doctor` no los refleja. Modo contenedor: montar el socket y añadir su grupo (`-v /var/run/docker.sock:/var/run/docker.sock --group-add <gid>`).
+
+**Límites conocidos.** `baseline init/migrate` no incluyen `image` (no reciben una referencia). `[tools.trivy]` y `ToolSkip` se indexan por herramienta, no por categoría, así que `sca` e `image` los comparten. La plantilla de Azure Pipelines no ofrece `image`. SARIF usa la ruta de origen como `artifactLocation`, que para paquetes de SO no es un archivo del repositorio.
+
 ## §11. Estrategia de pruebas: los fakes son permanentes
 
 Los adaptadores falsos del núcleo no son andamiaje temporal que se descarta una vez

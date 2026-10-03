@@ -84,6 +84,25 @@ def iac_fingerprint(*, rule_id: str, path: str, resource: str) -> str:
     return f"{FINGERPRINT_VERSION}:{_digest(rule_id, path, resource)}"
 
 
+def image_fingerprint(
+    *, package_name: str, package_version: str, vulnerability_id: str, origin: str
+) -> str:
+    """Compute the ``image`` category fingerprint (ADR §5 amendment, 2026-10-02).
+
+    Ingredients: package name, installed version, vulnerability identifier,
+    and the package's ``origin`` inside the image (a file path, or the OS
+    package database type). The image reference, tag and layer digests are
+    excluded: a pipeline builds a new tag every run, and the same
+    vulnerable package must keep one identity across builds for baselines
+    to work. A leading ``image`` tag keeps the value distinct from an
+    ``sca`` fingerprint over the same four strings.
+    """
+    return (
+        f"{FINGERPRINT_VERSION}:"
+        f"{_digest('image', package_name, package_version, vulnerability_id, origin)}"
+    )
+
+
 def short_fingerprints(fingerprints: Iterable[str], *, min_length: int = 8) -> dict[str, str]:
     """Compute a display-safe short form of each of ``fingerprints`` (ADR §7, "FP").
 

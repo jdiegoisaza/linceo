@@ -1,4 +1,4 @@
-"""``linceo scan <secrets|sca|iac>``: run one tool end to end (ADR §8, §10).
+"""``linceo scan <secrets|sca|iac|image>``: run one tool end to end (ADR §8, §10).
 
 Translates CLI flags into the domain objects `linceo.core.engine.run`
 already expects, and nothing more (AGENTS.md, "CLI framework") — the exact
@@ -29,6 +29,7 @@ from linceo.adapters.checkov import CheckovIntegration
 from linceo.adapters.gitleaks import GitleaksIntegration
 from linceo.adapters.subprocess_executor import SubprocessToolExecutor
 from linceo.adapters.trivy import TrivyIntegration, TrivyOutputError
+from linceo.adapters.trivy_image import InvalidImageReferenceError, TrivyImageIntegration
 from linceo.core.config import Config, ConfigurationError, load_config, resolve_local_document
 from linceo.core.context import ContextResolutionError, Platform
 from linceo.core.engine import run
@@ -621,6 +622,112 @@ def scan_iac(
     _run_scan(
         category=Category.IAC,
         integration=CheckovIntegration(version=checkov_version),
+        context_provider=context_provider,
+        workspace_path=workspace_path,
+        executor=executor,
+        normalizer=SeverityNormalizer.from_severity_map(severity_map),
+        resolved_config=resolved_config,
+        output_format=output_format,
+        dry_run=dry_run,
+        now=now,
+    )
+
+
+@scan_app.command("image")
+def scan_image(
+    image: str = typer.Argument(
+        ...,
+        help=(
+            "Reference of an image already in the local Docker daemon (name:tag, "
+            "name@digest or image ID). It is never pulled; a reachable daemon is required."
+        ),
+    ),
+    path: Path = typer.Option(
+        Path(), "--path", help="Workspace directory holding the policy file and git context."
+    ),
+    platform: PlatformOption = typer.Option(
+        PlatformOption.AUTO,
+        "--platform",
+        help=(
+            "CI platform to resolve ExecutionContext from. `auto` detects Azure Pipelines via "
+            "its TF_BUILD sentinel, GitHub Actions via its GITHUB_ACTIONS sentinel, and falls "
+            "back to `local` otherwise (ADR §4 R1, §8) — always overridable explicitly."
+        ),
+    ),
+    fail_on: FailOnOption | None = typer.Option(
+        None,
+        "--fail-on",
+        help=(
+            "Severity threshold that fails the exit code. Given at all, this replaces any "
+            "[thresholds] table declared in the policy file entirely (ADR §8.1)."
+        ),
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.CONSOLE, "--format", help="Report format."
+    ),
+    config: Path | None = typer.Option(
+        None, "--config", help="Explicit configuration file path (ADR R5)."
+    ),
+    continue_on_tool_error: bool | None = typer.Option(
+        None,
+        "--continue-on-tool-error/--no-continue-on-tool-error",
+        help="Do not fail the run over a tool execution failure or incomplete evidence.",
+    ),
+    strict_normalization: bool | None = typer.Option(
+        None,
+        "--strict-normalization/--no-strict-normalization",
+        help="Fail if any finding has no severity signal but the fallback.",
+    ),
+    max_rows: int | None = typer.Option(
+        None,
+        "--max-rows",
+        help="Console table rows shown per category before summarizing the rest (ADR §7).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the command that would run and exit, without scanning anything.",
+    ),
+) -> None:
+    """Scan a local-daemon container image for vulnerable packages with Trivy."""
+    workspace_path = str(path.resolve())
+    now = datetime.now(UTC)
+    env = process_environment()
+
+    resolved_config = _load_resolved_config(
+        cli_overrides=_cli_overrides(
+            fail_on=fail_on,
+            continue_on_tool_error=continue_on_tool_error,
+            strict_normalization=strict_normalization,
+            max_rows=max_rows,
+        ),
+        env=env,
+        config_path=config,
+        workspace_path=workspace_path,
+        now=now,
+    )
+    context_provider = resolve_context_provider(
+        platform=platform, workspace_path=workspace_path, env=env
+    )
+
+    executor = SubprocessToolExecutor()
+    trivy_version, db_data_sources = detect_trivy(executor)
+    severity_map = load_severity_map()
+
+    try:
+        integration = TrivyImageIntegration(
+            image=image,
+            version=trivy_version,
+            db_data_sources=db_data_sources,
+            cvss_source_preference=severity_map.cvss_source_preference,
+        )
+    except InvalidImageReferenceError as exc:
+        typer.echo(f"Configuration error: {exc}", err=True)
+        raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
+
+    _run_scan(
+        category=Category.IMAGE,
+        integration=integration,
         context_provider=context_provider,
         workspace_path=workspace_path,
         executor=executor,

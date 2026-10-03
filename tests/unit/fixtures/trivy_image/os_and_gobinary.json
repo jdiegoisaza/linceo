@@ -1,0 +1,87 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "zricethezav/gitleaks:v8.24.2",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Target": "zricethezav/gitleaks:v8.24.2 (alpine 3.19.7)",
+      "Class": "os-pkgs",
+      "Type": "alpine",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2024-58251",
+          "PkgName": "busybox",
+          "InstalledVersion": "1.36.1-r19",
+          "FixedVersion": "1.36.1-r21",
+          "Layer": {
+            "Digest": "sha256:83abf496f1b833f01c8f72695520b8975cc8b730d14a8ac270d6201bd0f1877e",
+            "DiffID": "sha256:0499fc56f5e2303d8f36d9dd1908d469f446b41e0af05a98a5bcdbcecc799a43"
+          },
+          "Title": "In netstat in BusyBox through 1.37.0, local users can launch of networ ...",
+          "Severity": "MEDIUM"
+        },
+        {
+          "VulnerabilityID": "CVE-2025-46394",
+          "PkgName": "busybox",
+          "InstalledVersion": "1.36.1-r19",
+          "FixedVersion": "1.36.1-r21",
+          "Layer": {
+            "Digest": "sha256:83abf496f1b833f01c8f72695520b8975cc8b730d14a8ac270d6201bd0f1877e",
+            "DiffID": "sha256:0499fc56f5e2303d8f36d9dd1908d469f446b41e0af05a98a5bcdbcecc799a43"
+          },
+          "Title": "In tar in BusyBox through 1.37.0, a TAR archive can have filenames hid ...",
+          "Severity": "LOW",
+          "CVSS": {
+            "nvd": {
+              "V3Vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N",
+              "V3Score": 3.3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "Target": "usr/bin/gitleaks",
+      "Class": "lang-pkgs",
+      "Type": "gobinary",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2025-22869",
+          "PkgName": "golang.org/x/crypto",
+          "InstalledVersion": "v0.32.0",
+          "FixedVersion": "0.35.0",
+          "Layer": {
+            "Digest": "sha256:0d6c2d91852b4f0e1caf65bfd82b406e7ef6ac388f31837abdf22497f9db0b4f",
+            "DiffID": "sha256:a9752e893e8c8f0d903b921d26a247e23a2e93fb3471001547776a9b061bc3bb"
+          },
+          "Title": "golang.org/x/crypto/ssh: Denial of Service in the Key Exchange of golang.org/x/crypto/ssh",
+          "Severity": "HIGH",
+          "CVSS": {
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+              "V3Score": 7.5
+            }
+          }
+        },
+        {
+          "VulnerabilityID": "CVE-2025-47913",
+          "PkgName": "golang.org/x/crypto",
+          "InstalledVersion": "v0.32.0",
+          "FixedVersion": "0.43.0",
+          "Layer": {
+            "Digest": "sha256:0d6c2d91852b4f0e1caf65bfd82b406e7ef6ac388f31837abdf22497f9db0b4f",
+            "DiffID": "sha256:a9752e893e8c8f0d903b921d26a247e23a2e93fb3471001547776a9b061bc3bb"
+          },
+          "Title": "golang.org/x/crypto/ssh/agent: golang.org/x/crypto/ssh/agent: SSH client panic due to unexpected SSH_AGENT_SUCCESS",
+          "Severity": "HIGH",
+          "CVSS": {
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+              "V3Score": 7.5
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

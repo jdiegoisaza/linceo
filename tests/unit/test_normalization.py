@@ -309,3 +309,26 @@ def test_normalize_finding_is_deterministic_for_the_same_raw_finding() -> None:
     second = normalize_finding(raw, normalizer)
 
     assert first == second
+
+
+def test_an_image_finding_without_a_package_cannot_be_fingerprinted() -> None:
+    from dataclasses import replace
+
+    from linceo.core.findings import Category, Location, RawFinding
+    from linceo.core.normalization import SeverityNormalizer, normalize_finding
+    from linceo.core.severity_map import load_severity_map
+
+    raw = RawFinding(
+        tool="trivy",
+        category=Category.IMAGE,
+        rule_id="CVE-1",
+        message="m",
+        location=Location(path="alpine"),
+        raw_severity="HIGH",
+    )
+    normalizer = SeverityNormalizer.from_severity_map(load_severity_map())
+
+    with pytest.raises(ValueError, match="image RawFinding must set package"):
+        normalize_finding(raw, normalizer)
+    with pytest.raises(ValueError, match="no fingerprint algorithm"):
+        normalize_finding(replace(raw, category="unknown"), normalizer)  # type: ignore[arg-type]

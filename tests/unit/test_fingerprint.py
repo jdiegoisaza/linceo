@@ -223,3 +223,19 @@ def test_short_fingerprints_rejects_a_value_without_the_current_version_prefix()
 
 def test_short_fingerprints_of_an_empty_input_is_empty() -> None:
     assert short_fingerprints([]) == {}
+
+
+def test_image_fingerprint_is_versioned_distinct_from_sca_and_ignores_nothing_else() -> None:
+    from linceo.core.fingerprint import image_fingerprint
+
+    ingredients = {
+        "package_name": "busybox",
+        "package_version": "1.36.1-r19",
+        "vulnerability_id": "CVE-2024-58251",
+    }
+    image = image_fingerprint(**ingredients, origin="alpine")
+
+    assert image.startswith("v1:")
+    assert image == image_fingerprint(**ingredients, origin="alpine")
+    assert image != image_fingerprint(**ingredients, origin="debian")
+    assert image != sca_fingerprint(**ingredients, manifest_path="alpine")

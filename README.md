@@ -107,6 +107,39 @@ also why `iac` is the slowest of the three categories (see below):
 Checkov runs many independent rule checks against every resource it graphs,
 where Gitleaks and Trivy each run one pass over the input.
 
+### Scanning a built container image (`scan image`)
+
+`scan image <reference>` reports vulnerable packages *inside* an image that
+is already in the local Docker daemon — OS packages and language packages
+alike. It is not `iac`, which checks the files that describe a container.
+Real output from `trivy 0.74.0`, one image, two kinds of package:
+
+```
+linceo scan image zricethezav/gitleaks:v8.24.2 --max-rows 3
+```
+
+```
+image:
+  | SEVERITY | ID             | LOCATION       | TOOL  | FP          | ORIGIN           | LAYER               | FIXED                        |
+  | CRITICAL | CVE-2025-68121 | stdlib@v1.23.7 | trivy | v1:3c6be5d3 | usr/bin/gitleaks | sha256:a9752e893... | 1.24.13, 1.25.7, 1.26.0-rc.3 |
+  | HIGH     | CVE-2025-46334 | git@2.43.6-r0  | trivy | v1:734cedb1 | alpine           | sha256:57ca6c565... | 2.43.7-r0                    |
+```
+
+`ORIGIN` is a file path inside the image for language packages and the
+package database (`alpine`, `debian`) for OS packages. The image reference
+is deliberately not part of a finding's fingerprint, so a new tag per build
+does not invalidate baselines.
+
+This category needs a reachable Docker daemon and never pulls an image
+(a missing one fails with an explicit message). From the reference
+container, mount the socket and add its group:
+
+```bash
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  --group-add "$(stat -c %g /var/run/docker.sock)" \
+  ghcr.io/jdiegoisaza/linceo scan image my-app:build-42
+```
+
 ### What it costs, measured on a real agent
 
 | Step | Measured |

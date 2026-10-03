@@ -157,11 +157,14 @@ def _properties(finding: Finding) -> dict[str, object] | None:
     otherwise be entirely invisible in this interchange format.
     """
     if finding.package is not None:
-        return {
+        package_properties: dict[str, object] = {
             "package_name": finding.package.name,
             "package_version": finding.package.version,
             "fixed_version": finding.package.fixed_version,
         }
+        if finding.location.layer is not None:
+            package_properties["layer"] = finding.location.layer
+        return package_properties
     if finding.resource is not None:
         return {"resource": finding.resource}
     return None

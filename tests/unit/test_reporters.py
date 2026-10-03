@@ -650,7 +650,12 @@ def test_json_report_round_trips_every_finding_losslessly() -> None:
     [reported] = document["findings"]
     assert reported["fingerprint"] == finding.fingerprint
     assert reported["severity"] == "HIGH"
-    assert reported["location"] == {"path": "src/config.py", "line": 1, "column": None}
+    assert reported["location"] == {
+        "path": "src/config.py",
+        "line": 1,
+        "column": None,
+        "layer": None,
+    }
 
 
 def test_json_report_is_deterministic() -> None:

@@ -28,3 +28,7 @@ equivalent already-populated `--cache-dir`) — the reference container
 image bakes one in at build time (ADR §4/R4, §5); a bare `trivy` install
 with no database yet only satisfies the subset of tests that do not
 require one (`test_detect_version_reports_the_real_installed_trivy_version`).
+
+`test_trivy_image_integration.py` additionally needs a reachable Docker
+daemon holding `hello-world:latest` (`docker pull hello-world`); its tests
+are skipped when no daemon is reachable.
