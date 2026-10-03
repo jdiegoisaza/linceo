@@ -168,7 +168,7 @@ jobs:
 
       - name: Cache trivy's vulnerability database
         id: trivy-db-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ steps.date.outputs.date }}
