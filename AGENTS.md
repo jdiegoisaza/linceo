@@ -26,8 +26,8 @@ src/linceo/
 tests/unit/         Fast tests, no real tool binaries required.
 tests/integration/  Tests that require real tool binaries on PATH. See
                      tests/integration/README.md. Deselected by default
-                     (pytest marker `integration`); always run in this
-                     project's own CI.
+                     (pytest marker `integration`); only the
+                     offline-guarantee test runs in this project's CI.
 docs/adr/            Architecture decision records.
 ```
 

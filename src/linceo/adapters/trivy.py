@@ -27,7 +27,10 @@ exits non-zero by design whenever it finds a leak.
 `--skip-db-update` is always passed (ADR R2/§5: offline by default, no
 network call as a side effect of a scan) — see `TrivyDatabaseNotReadyError`
 below for the one documented, actionable exception this creates on a
-database that was never downloaded at all.
+database that was never downloaded at all. It is not sufficient on its own:
+trivy also contacts `check.trivy.dev` on every scan, and only
+`--disable-telemetry` *together with* `--skip-version-check` stops that
+(each alone still connects) — see `TRIVY_OFFLINE_FLAGS`.
 """
 
 from __future__ import annotations
@@ -55,6 +58,12 @@ _REPORT_SCHEMA = ReportSchema(
         Column(header="FIXED", fields=("package.fixed_version",), missing="(none)"),
     ),
 )
+
+#: The flag pair that stops trivy contacting `check.trivy.dev` (ADR R2). Measured
+#: against trivy 0.74.0 under network isolation: either flag alone still
+#: connects on every scan, only the pair does not. Shared by every trivy
+#: subcommand this project runs (`fs` for `sca`, `image` for `image`).
+TRIVY_OFFLINE_FLAGS: tuple[str, ...] = ("--disable-telemetry", "--skip-version-check")
 
 #: Binary name looked up on `PATH` (ADR R4) — never a path baked in at
 #: install time, exactly like `linceo.adapters.gitleaks.GITLEAKS_BINARY`.
@@ -348,6 +357,7 @@ class TrivyIntegration:
             "--format",
             "json",
             "--skip-db-update",
+            *TRIVY_OFFLINE_FLAGS,
         ]
         if config.exclude_paths:
             for excluded in config.exclude_paths:
@@ -511,6 +521,7 @@ __all__ = [
     "TRIVY_DB_NOT_READY_HINT",
     "TRIVY_MISSING_BINARY_HINT",
     "TRIVY_NATIVE_SEVERITY_DOMAIN",
+    "TRIVY_OFFLINE_FLAGS",
     "TRIVY_TOOL_NAME",
     "TRIVY_VULNERABILITY_DB_NAME",
     "TrivyDatabaseNotReadyError",

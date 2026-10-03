@@ -106,6 +106,8 @@ def test_build_command_is_a_list_argv_scanning_workspace_path() -> None:
         "--format",
         "json",
         "--skip-db-update",
+        "--disable-telemetry",
+        "--skip-version-check",
         "/workspace/widgets",
     )
     assert all(isinstance(part, str) for part in argv)

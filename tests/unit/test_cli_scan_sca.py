@@ -187,7 +187,10 @@ def test_dry_run_prints_the_command_without_running_anything(
     result = runner.invoke(app, ["scan", "sca", "--path", str(tmp_path), "--dry-run"])
 
     assert result.exit_code == 0
-    assert "trivy fs --scanners vuln --format json --skip-db-update" in result.output
+    assert (
+        "trivy fs --scanners vuln --format json --skip-db-update "
+        "--disable-telemetry --skip-version-check"
+    ) in result.output
     assert str(tmp_path.resolve()) in result.output
 
 

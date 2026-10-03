@@ -203,3 +203,68 @@ jobs:
         with:
           name: linceo-sca-sarif
           path: linceo-sca.sarif
+
+  offline:
+    name: Offline guarantee (R2)
+    runs-on: ubuntu-latest
+    # Runs every registered ToolIntegration for real under network isolation and
+    # fails if any of them attempts a connection (tests/integration/
+    # test_offline_guarantee.py). Only that file: the rest of tests/integration/
+    # has no CI job yet.
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      TRIVY_VERSION: "0.74.0"
+      TRIVY_SHA256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a"
+      # The version the reference container image pins (Dockerfile CHECKOV_VERSION).
+      CHECKOV_VERSION: "3.3.19"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install gitleaks (pinned, checksum-verified)
+        run: |
+          set -eu
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          printf '%s  gitleaks.tar.gz\n' "${GITLEAKS_SHA256}" > gitleaks.tar.gz.sha256
+          sha256sum -c gitleaks.tar.gz.sha256
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod 0755 gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          rm -f gitleaks.tar.gz gitleaks.tar.gz.sha256
+
+      - name: Install trivy (pinned, checksum-verified)
+        run: |
+          set -eu
+          curl -fsSL -o trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          printf '%s  trivy.tar.gz\n' "${TRIVY_SHA256}" > trivy.tar.gz.sha256
+          sha256sum -c trivy.tar.gz.sha256
+          tar -xzf trivy.tar.gz trivy
+          chmod 0755 trivy
+          sudo mv trivy /usr/local/bin/trivy
+          rm -f trivy.tar.gz trivy.tar.gz.sha256
+
+      - name: Fetch trivy's vulnerability database
+        # The one deliberate network call of this job besides installing tools:
+        # the scans themselves run with `--skip-db-update`.
+        run: trivy fs --download-db-only .
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+
+      - name: Install checkov (pinned)
+        run: |
+          uv tool install "checkov==${CHECKOV_VERSION}"
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+
+      - name: Allow unprivileged user namespaces
+        # Ubuntu 24.04 runners restrict them through AppArmor; the probe needs one
+        # to build its network-isolated namespace. The test fails loudly, never
+        # skips, if it still cannot.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Verify no integration touches the network
+        run: uv run pytest -m integration tests/integration/test_offline_guarantee.py --no-cov
