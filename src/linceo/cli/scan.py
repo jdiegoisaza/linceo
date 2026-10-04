@@ -191,6 +191,7 @@ def _cli_overrides(
     continue_on_tool_error: bool | None,
     strict_normalization: bool | None,
     max_rows: int | None,
+    only_fixable: bool | None,
 ) -> dict[str, str]:
     """Translate the scalar flags shared by every `scan <category>` command for `load_config`."""
     overrides: dict[str, str] = {}
@@ -202,6 +203,8 @@ def _cli_overrides(
         overrides["strict_normalization"] = str(strict_normalization)
     if max_rows is not None:
         overrides["report_max_rows"] = str(max_rows)
+    if only_fixable is not None:
+        overrides["only_fixable"] = str(only_fixable)
     return overrides
 
 
@@ -412,6 +415,15 @@ def scan_secrets(
         "--max-rows",
         help="Console table rows shown per category before summarizing the rest (ADR §7).",
     ),
+    only_fixable: bool | None = typer.Option(
+        None,
+        "--only-fixable/--no-only-fixable",
+        help=(
+            "Count only findings with a fixed version available against the gate; the rest "
+            "stay in the report and are declared as not counted. Applies to categories that "
+            "carry that data (sca, image); a no-op, with a warning, elsewhere."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -429,6 +441,7 @@ def scan_secrets(
             continue_on_tool_error=continue_on_tool_error,
             strict_normalization=strict_normalization,
             max_rows=max_rows,
+            only_fixable=only_fixable,
         ),
         env=env,
         config_path=config,
@@ -498,6 +511,15 @@ def scan_sca(
         "--max-rows",
         help="Console table rows shown per category before summarizing the rest (ADR §7).",
     ),
+    only_fixable: bool | None = typer.Option(
+        None,
+        "--only-fixable/--no-only-fixable",
+        help=(
+            "Count only findings with a fixed version available against the gate; the rest "
+            "stay in the report and are declared as not counted. Applies to categories that "
+            "carry that data (sca, image); a no-op, with a warning, elsewhere."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -515,6 +537,7 @@ def scan_sca(
             continue_on_tool_error=continue_on_tool_error,
             strict_normalization=strict_normalization,
             max_rows=max_rows,
+            only_fixable=only_fixable,
         ),
         env=env,
         config_path=config,
@@ -588,6 +611,15 @@ def scan_iac(
         "--max-rows",
         help="Console table rows shown per category before summarizing the rest (ADR §7).",
     ),
+    only_fixable: bool | None = typer.Option(
+        None,
+        "--only-fixable/--no-only-fixable",
+        help=(
+            "Count only findings with a fixed version available against the gate; the rest "
+            "stay in the report and are declared as not counted. Applies to categories that "
+            "carry that data (sca, image); a no-op, with a warning, elsewhere."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -605,6 +637,7 @@ def scan_iac(
             continue_on_tool_error=continue_on_tool_error,
             strict_normalization=strict_normalization,
             max_rows=max_rows,
+            only_fixable=only_fixable,
         ),
         env=env,
         config_path=config,
@@ -683,6 +716,15 @@ def scan_image(
         "--max-rows",
         help="Console table rows shown per category before summarizing the rest (ADR §7).",
     ),
+    only_fixable: bool | None = typer.Option(
+        None,
+        "--only-fixable/--no-only-fixable",
+        help=(
+            "Count only findings with a fixed version available against the gate; the rest "
+            "stay in the report and are declared as not counted. Applies to categories that "
+            "carry that data (sca, image); a no-op, with a warning, elsewhere."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -700,6 +742,7 @@ def scan_image(
             continue_on_tool_error=continue_on_tool_error,
             strict_normalization=strict_normalization,
             max_rows=max_rows,
+            only_fixable=only_fixable,
         ),
         env=env,
         config_path=config,

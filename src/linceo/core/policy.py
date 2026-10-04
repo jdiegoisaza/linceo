@@ -123,6 +123,36 @@ class ConfigLayer(StrEnum):
     DEFAULT = "default"
 
 
+class CountingCriterion(StrEnum):
+    """Which findings the gate counts against its thresholds (ADR §8.1 amendment, 2026-10-03).
+
+    `ALL` counts every active finding. `FIXABLE_ONLY` leaves out the findings
+    that carry fix data (a `Finding.package`) but no fixed version: ones nobody
+    can act on by updating something. A finding with no package at all —
+    `secrets`, `iac` — has no such datum, so it is always counted under either
+    criterion; the gate never infers "unfixable" from the mere absence of
+    data a category cannot have.
+    """
+
+    ALL = "all"
+    FIXABLE_ONLY = "fixable-only"
+
+
+@dataclass(frozen=True, slots=True)
+class CriterionResolution:
+    """The counting criterion a run used, and which layer set it (ADR §8.1 amendment).
+
+    `superseded` is the criterion a policy document declared when a higher
+    layer (CLI or environment) replaced it with a *different* one — `None`
+    otherwise — so a report can announce the override exactly as it does for
+    `ThresholdResolution.superseded`.
+    """
+
+    criterion: CountingCriterion = CountingCriterion.ALL
+    source: ConfigLayer = ConfigLayer.DEFAULT
+    superseded: CountingCriterion | None = None
+
+
 def thresholds_from_fail_on(fail_on: Severity) -> Thresholds:
     """Translate a single `--fail-on` cutoff into per-severity maximum counts (ADR §8.1).
 

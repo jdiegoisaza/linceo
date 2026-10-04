@@ -121,7 +121,9 @@ _DECLARATION_KNOWN_FIELDS = frozenset({"repository", "path", "project", "token_e
 #: trail — see `linceo.core.banner`'s own module docstring for the full
 #: reasoning, including why its *value* gets an extra content check
 #: `_decode_and_validate` runs that the other three governed keys do not.
-_REMOTE_GOVERNED_KEYS = frozenset({"fail_on", "thresholds", "tool_defaults", "tools", "banner"})
+_REMOTE_GOVERNED_KEYS = frozenset(
+    {"fail_on", "only_fixable", "thresholds", "tool_defaults", "tools", "banner"}
+)
 _REMOTE_ALLOWED_TOP_LEVEL_KEYS = frozenset({"version"}) | _REMOTE_GOVERNED_KEYS
 
 #: Local-only sections a remote document must never declare (ADR §8.4's

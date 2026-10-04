@@ -15,7 +15,13 @@ from enum import StrEnum
 from linceo.core.context import ExecutionContext
 from linceo.core.execution import ToolExecution
 from linceo.core.findings import Category, Finding
-from linceo.core.policy import Exclusion, SeverityOverride, ThresholdResolution, ToolSkip
+from linceo.core.policy import (
+    CriterionResolution,
+    Exclusion,
+    SeverityOverride,
+    ThresholdResolution,
+    ToolSkip,
+)
 from linceo.core.remote_policy import PolicySourceStatus
 from linceo.core.severity import Severity
 
@@ -77,6 +83,15 @@ class Verdict:
     same findings pooled across categories into one flat summary — never
     used for gate evaluation itself, only for the run-wide count a report
     or a consumer that does not care about per-category thresholds wants.
+
+    `counting` records by which criterion the gate counted (ADR §8.1
+    amendment, 2026-10-03): under `FIXABLE_ONLY`, `counts_by_category` and
+    `breaches` reflect only the findings that criterion kept, and
+    `uncounted_by_category` says, per category and severity, what it left
+    out — evidence stays in the report, only the gate's counting changes.
+    `criterion_not_applicable` names categories that had findings but none
+    carrying fix data, where the criterion could not apply and every finding
+    was counted instead.
     """
 
     resolution: ThresholdResolution
@@ -84,6 +99,9 @@ class Verdict:
     counts_by_category: Mapping[Category, Mapping[Severity, int]]
     breaches: tuple[ThresholdBreach, ...]
     passed: bool
+    counting: CriterionResolution = field(default_factory=CriterionResolution)
+    uncounted_by_category: Mapping[Category, Mapping[Severity, int]] = field(default_factory=dict)
+    criterion_not_applicable: tuple[Category, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

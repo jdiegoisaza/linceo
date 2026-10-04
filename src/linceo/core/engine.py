@@ -287,7 +287,11 @@ def run(
     exclusion_outcome = apply_exclusions(
         deduplicated, config.policy.exclusions, today=today, repository=context.repository
     )
-    verdict = evaluate_gate(exclusion_outcome.active, resolution=config.threshold_resolution)
+    verdict = evaluate_gate(
+        exclusion_outcome.active,
+        resolution=config.threshold_resolution,
+        counting=config.counting,
+    )
 
     status = (
         RunStatus.PARTIAL

@@ -21,10 +21,15 @@ from linceo.core.execution import ExecutionStatus
 from linceo.core.findings import Category, Finding
 from linceo.core.fingerprint import short_fingerprints
 from linceo.core.gate import find_breaches
-from linceo.core.policy import DEFAULT_REPORT_MAX_ROWS, ConfigLayer, ThresholdResolution
+from linceo.core.policy import (
+    DEFAULT_REPORT_MAX_ROWS,
+    ConfigLayer,
+    CountingCriterion,
+    ThresholdResolution,
+)
 from linceo.core.remote_policy import PolicySourceState, PolicySourceStatus
 from linceo.core.report_schema import ReportSchema
-from linceo.core.results import RunResult, RunStatus, ThresholdBreach
+from linceo.core.results import RunResult, RunStatus, ThresholdBreach, Verdict
 from linceo.core.severity import SEVERITY_ORDER, Severity
 from linceo.core.table import render_category_table, sort_key
 
@@ -294,11 +299,71 @@ def _severity_override_lines(result: RunResult) -> list[str]:
     return lines
 
 
+def _counting_lines(verdict: Verdict) -> list[str]:
+    """Declare how the gate counted: override, criterion, what it left out, where it did not apply.
+
+    Nothing the criterion leaves out disappears: the findings stay in the
+    tables above, and this block says how many were not counted, per
+    category and severity — a green gate next to hundreds of listed
+    vulnerabilities must explain itself. A category where the criterion
+    could not apply (its findings carry no fixed-version data) is named
+    rather than silently counted, so enabling `only_fixable` for
+    `secrets` or `iac` is visibly a no-op, never a quiet one.
+    """
+    counting = verdict.counting
+    lines: list[str] = []
+    if counting.source in (ConfigLayer.CLI, ConfigLayer.ENV) and counting.superseded is not None:
+        if counting.source is ConfigLayer.CLI:
+            flag = "only-fixable"
+            trigger = (
+                f"--{flag}"
+                if counting.criterion is CountingCriterion.FIXABLE_ONLY
+                else f"--no-{flag}"
+            )
+        else:
+            trigger = "the LINCEO_ONLY_FIXABLE environment variable"
+        lines.append(
+            f"Counting override: {trigger} replaced the counting criterion the policy "
+            f"declared ({counting.superseded.value}) with {counting.criterion.value}."
+        )
+        lines.append("")
+
+    if counting.criterion is not CountingCriterion.FIXABLE_ONLY:
+        return lines
+
+    lines.append("Gate counting: only findings with a fixed version available (only_fixable).")
+    if not verdict.uncounted_by_category:
+        lines.append("  Not counted: none.")
+    for category in Category:
+        severities = verdict.uncounted_by_category.get(category)
+        if severities is None:
+            continue
+        detail = ", ".join(
+            f"{severities[severity]} {severity.value}"
+            for severity in SEVERITY_ORDER
+            if severities[severity]
+        )
+        lines.append(
+            f"  Not counted, no fixed version available — {category.value}: "
+            f"{sum(severities.values())} ({detail})"
+        )
+    lines.extend(
+        f"  Warning: only_fixable does not apply to {category.value} — its findings carry no "
+        "fixed-version data, so all of them were counted."
+        for category in verdict.criterion_not_applicable
+    )
+    lines.append("")
+    return lines
+
+
 def _gate_lines(result: RunResult) -> list[str]:
     """The gate verdict, never rendered as `PASSED` when `result.status` is `PARTIAL` (ADR §5)."""
     verdict = result.verdict
     lines = _policy_override_lines(verdict.resolution)
     lines.extend(_threshold_source_lines(result))
+    lines.extend(_counting_lines(verdict))
+    fixable_only = verdict.counting.criterion is CountingCriterion.FIXABLE_ONLY
+    note = " (counting only findings with a fix available)" if fixable_only else ""
 
     if result.status is RunStatus.PARTIAL:
         incomplete = sum(
@@ -336,9 +401,9 @@ def _gate_lines(result: RunResult) -> list[str]:
         return lines
 
     if verdict.passed:
-        lines.append("Gate: PASSED")
+        lines.append(f"Gate: PASSED{note}")
     else:
-        lines.append("Gate: FAILED")
+        lines.append(f"Gate: FAILED{note}")
         lines.extend(f"  - {_format_breach(breach)}" for breach in verdict.breaches)
     return lines
 

@@ -140,6 +140,18 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/jdiegoisaza/linceo scan image my-app:build-42
 ```
 
+#### Counting only what can be fixed (`--only-fixable`)
+
+A Debian image brings hundreds of OS CVEs that only a newer base image fixes.
+`--only-fixable` (or `only_fixable = true` in the policy file, or
+`LINCEO_ONLY_FIXABLE`) makes the gate count only findings with a fixed version
+available. Nothing is hidden: unfixed findings stay in the table, and the
+report says how many the gate did not count. Measured on `postgres:16` with
+`--fail-on high`: counting everything gives 14 CRITICAL / 128 HIGH; counting
+only fixable ones gives 13 / 72, with 268 findings declared as not counted.
+It applies to `sca` and `image`; on `secrets` and `iac`, which carry no fixed
+version, it warns and counts everything.
+
 ### What it costs, measured on a real agent
 
 | Step | Measured |

@@ -1393,6 +1393,22 @@ desconocida, y el caso de reemplazo por `--fail-on`; `core.gate.find_breaches` s
 prueba con dos categorías con tablas distintas en el mismo run para confirmar que
 ninguna interfiere con la otra.
 
+#### Enmienda (2026-10-03): criterio de conteo del gate — `only_fixable`
+
+Un modo del gate que cuenta solo los hallazgos con versión corregida disponible (`--only-fixable`, `LINCEO_ONLY_FIXABLE`, clave `only_fixable` de la política). Motivo: una imagen Debian trae cientos de CVEs de SO que el equipo no puede arreglar —los arregla actualizar la imagen base—, y bloquear por ellos produce una solicitud de excepción el primer día. Un CVE con fix sí es accionable.
+
+**Dónde vive: en el gate, no en el adaptador.** `--ignore-unfixed` de Trivy impediría que esos hallazgos entraran al modelo y entonces no se podría avisar de ellos. Los hallazgos siguen en `RunResult.findings` y en la tabla (la columna `FIXED` ya los distingue); lo que cambia es qué cuenta contra los umbrales. `evaluate_gate` sigue sin ramificar por categoría: pregunta al hallazgo.
+
+**«Sin fix» no es `fixed_version is None` a secas.** Un hallazgo de `secrets` o `iac` tampoco tiene `package`, y tratarlo como «sin fix» lo excluiría en silencio: un gate verde falso. Solo un hallazgo con `package` y sin versión corregida (o con cadena vacía) queda fuera; los demás cuentan siempre, bajo cualquier criterio.
+
+**Configuración y precedencia.** Misma cadena que el resto (CLI > entorno > política > por defecto `all`). Se puede declarar en la política, local o remota, porque es una decisión de riesgo de la organización; y es sobrescribible por CLI/entorno porque quien lanza el comando puede querer cambiarlo puntualmente. La razón de tratarlo como `fail_on` y no como un escalar más: cambia qué cuentan los umbrales, así que pertenece al mismo conjunto gobernable por la política remota (`_REMOTE_GOVERNED_KEYS`). Como con `fail_on`, un valor de un nivel superior que *reemplaza uno distinto* declarado por la política se anuncia en el reporte («Counting override: …»); si coincide, no hay nada que anunciar. Consecuencia aceptada: un pipeline puede relajar el gate con `--only-fixable` aunque la política no lo declare, igual que ya puede con `--fail-on none`; el reporte lo deja a la vista.
+
+**Qué ve el usuario.** El reporte declara el criterio, cuántos hallazgos quedaron fuera por categoría y severidad («Not counted, no fixed version available — image: 268 (1 CRITICAL, 56 HIGH, …)»), y el veredicto lo repite («Gate: FAILED (counting only findings with a fix available)»). Un gate verde junto a cientos de vulnerabilidades listadas sin explicación destruiría la confianza en el gate.
+
+**Categorías sin el dato.** Activarlo con `secrets` o `iac` no hace nada, y eso se avisa: ignorar en silencio es lo que este proyecto evita. No es un error: la política es compartida, y un `only_fixable = true` a nivel de organización no debe romper los pipelines de `secrets`. El lado seguro se conserva, porque esos hallazgos se cuentan completos. Límite: el aviso se deduce de los hallazgos (una categoría con hallazgos y ninguno con datos de fix); una categoría sin hallazgos no lo emite.
+
+**`Verdict`.** Registra, además de qué condición falló (`breaches`), con qué criterio se contó: `counting` (criterio, capa que lo fijó y, si se reemplazó, el criterio declarado), `uncounted_by_category` y `criterion_not_applicable`. `counts_by_category` pasa a ser lo que el gate evaluó (ya lo documentaba así); `counts_by_severity` sigue agrupando todos los hallazgos activos. Cambio aditivo del JSON público.
+
 ### §8.2. Baseline y supresiones
 
 > **Nota de esta revisión del contrato:** lo que esta sección llama "entrada de

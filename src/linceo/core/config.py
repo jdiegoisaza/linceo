@@ -57,6 +57,8 @@ from linceo.core.policy import (
     DEFAULT_REPORT_MAX_ROWS,
     CategoryThresholds,
     ConfigLayer,
+    CountingCriterion,
+    CriterionResolution,
     Policy,
     PolicyConfigurationError,
     ThresholdResolution,
@@ -93,17 +95,23 @@ _GENERIC_SCALAR_ENV_VARS: Mapping[str, str] = MappingProxyType(
 
 _FAIL_ON_ENV_VAR = "LINCEO_FAIL_ON"
 
+#: `only_fixable` interacts with the gate like `fail_on` does (it changes what the
+#: thresholds count) and records which layer set it, so it is resolved separately
+#: (`_resolve_counting`) rather than through `_GENERIC_SCALAR_ENV_VARS`.
+_ONLY_FIXABLE_ENV_VAR = "LINCEO_ONLY_FIXABLE"
+
 #: Every scalar field a `--flag`, an environment variable, or the file's
 #: flat keys may legitimately set — anything else in `cli_overrides` is a
 #: typo, rejected loudly. Excludes `thresholds`/`exclusions`/`skipped_tools`,
 #: which are file-only (no CLI or environment-variable equivalent, ADR §8).
-_OVERRIDABLE_FIELDS = frozenset({"fail_on", *_GENERIC_SCALAR_ENV_VARS})
+_OVERRIDABLE_FIELDS = frozenset({"fail_on", "only_fixable", *_GENERIC_SCALAR_ENV_VARS})
 
 #: Top-level keys a policy document may declare at all.
 _FILE_TOP_LEVEL_KNOWN_KEYS = frozenset(
     {
         "version",
         "fail_on",
+        "only_fixable",
         "continue_on_tool_error",
         "strict_normalization",
         "max_expiry_horizon_days",
@@ -119,7 +127,7 @@ _FILE_TOP_LEVEL_KNOWN_KEYS = frozenset(
     }
 )
 
-_BOOLEAN_FIELDS = frozenset({"continue_on_tool_error", "strict_normalization"})
+_BOOLEAN_FIELDS = frozenset({"continue_on_tool_error", "strict_normalization", "only_fixable"})
 _INTEGER_FIELDS = frozenset({"max_expiry_horizon_days", "report_max_rows"})
 _TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "off"})
@@ -188,6 +196,7 @@ class Config:
     threshold_resolution: ThresholdResolution = field(
         default_factory=lambda: ThresholdResolution.for_fail_on(None, source=ConfigLayer.DEFAULT)
     )
+    counting: CriterionResolution = field(default_factory=CriterionResolution)
     continue_on_tool_error: bool = False
     strict_normalization: bool = False
     max_expiry_horizon_days: int = DEFAULT_MAX_HORIZON_DAYS
@@ -475,6 +484,45 @@ def _resolve_fail_on(
     return None, ConfigLayer.DEFAULT
 
 
+def _resolve_counting(
+    *,
+    cli_overrides: Mapping[str, str],
+    env: Mapping[str, str],
+    raw_document: Mapping[str, object],
+) -> CriterionResolution:
+    """Resolve `only_fixable` into the gate's counting criterion and the layer that set it.
+
+    Same chain as every other setting — CLI > environment > policy document
+    (local, or remote-governed) > default `ALL` — plus, when a CLI flag or
+    environment variable replaced a *different* value the policy document
+    declared, that declared criterion as `superseded`, so the report can say
+    the gate was loosened or tightened from what the policy intended.
+    """
+
+    def criterion(value: bool) -> CountingCriterion:
+        return CountingCriterion.FIXABLE_ONLY if value else CountingCriterion.ALL
+
+    declared = (
+        criterion(cast("bool", _coerce_scalar("only_fixable", raw_document["only_fixable"])))
+        if "only_fixable" in raw_document
+        else None
+    )
+    if "only_fixable" in cli_overrides:
+        value, layer = (
+            _coerce_scalar("only_fixable", cli_overrides["only_fixable"]),
+            ConfigLayer.CLI,
+        )
+    elif _ONLY_FIXABLE_ENV_VAR in env:
+        value, layer = _coerce_scalar("only_fixable", env[_ONLY_FIXABLE_ENV_VAR]), ConfigLayer.ENV
+    elif declared is not None:
+        return CriterionResolution(criterion=declared, source=ConfigLayer.FILE)
+    else:
+        return CriterionResolution()
+    chosen = criterion(cast("bool", value))
+    superseded = declared if declared is not None and declared is not chosen else None
+    return CriterionResolution(criterion=chosen, source=layer, superseded=superseded)
+
+
 def _resolve_threshold_resolution(
     *,
     fail_on: Severity | None,
@@ -606,6 +654,8 @@ def load_config(
         cli_overrides=cli_overrides, env=env, raw_document=raw_document
     )
 
+    counting = _resolve_counting(cli_overrides=cli_overrides, env=env, raw_document=raw_document)
+
     try:
         policy_document = parse_policy_document(
             raw_document,
@@ -628,6 +678,7 @@ def load_config(
 
     return Config(
         threshold_resolution=threshold_resolution,
+        counting=counting,
         continue_on_tool_error=continue_on_tool_error,
         strict_normalization=strict_normalization,
         max_expiry_horizon_days=max_expiry_horizon_days,

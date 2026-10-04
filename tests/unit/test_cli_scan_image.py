@@ -147,3 +147,36 @@ def test_unreachable_daemon_surfaces_the_actionable_message(
 
     assert result.exit_code == EXIT_TOOL_EXECUTION_FAILED
     assert "needs a reachable Docker daemon" in result.output
+
+
+def test_only_fixable_counts_the_findings_with_a_fix_and_declares_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`os_and_python.json`: one Debian finding with no fix, two `pip` findings with one."""
+    _stub(monkeypatch, _out("os_and_python"))
+    repo = _repo(tmp_path / "w")
+    argv = ["scan", "image", "i", "--path", str(repo), "--fail-on", "low"]
+
+    counting_all = runner.invoke(app, argv)
+    only_fixable = runner.invoke(app, [*argv, "--only-fixable"])
+
+    assert "Gate counting" not in counting_all.output
+    assert "Gate counting: only findings with a fixed version available" in only_fixable.output
+    assert "Not counted, no fixed version available — image: 1 (" in only_fixable.output
+    assert "apt" in only_fixable.output, "the unfixed finding stays in the table"
+    assert "(none)" in only_fixable.output, "FIXED still distinguishes it"
+    assert "counting only findings with a fix available" in only_fixable.output
+
+
+def test_the_cli_flag_overrides_the_policy_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub(monkeypatch, _out("os_and_python"))
+    repo = _repo(tmp_path / "w")
+    (repo / ".devsecops").mkdir()
+    (repo / ".devsecops" / "config.toml").write_text("only_fixable = true\n")
+
+    result = runner.invoke(app, ["scan", "image", "i", "--path", str(repo), "--no-only-fixable"])
+
+    assert "Counting override: --no-only-fixable replaced" in result.output
+    assert "Gate counting" not in result.output
